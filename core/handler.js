@@ -2739,6 +2739,7 @@ function pageLogic() {
       const port = document.getElementById(isProxy ? 'proxyTargetPort' : 'targetPort').value;
     //   const rows = Array.from(resultTable.rows).slice(0, DEFAULT_SAVE_IPS_COUNT);
       const rows = Array.from(resultTable.rows); //.slice(0, DEFAULT_SAVE_IPS_COUNT);
+      saveCount = rows.length;
       if (rows.length === 0) {
         alert("没有可复制的结果");
         return;
@@ -2750,8 +2751,8 @@ function pageLogic() {
       });
       const textToCopy = lines.join('\\n');
       navigator.clipboard.writeText(textToCopy)
-        // .then(() => alert("✅ 已复制前 ${rows.length} 个优选IP"))
-        .then(() => alert("✅ 已复制优选IP"))
+        .then(() => alert("✅ 已复制前 ${ saveCount } 个优选IP"))
+        // .then(() => alert("✅ 已复制优选IP"))
         .catch(() => alert("❌ 复制失败，请手动复制"));
     }
 
