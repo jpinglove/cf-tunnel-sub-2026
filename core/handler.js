@@ -65,7 +65,7 @@ let hostRemark;
 let enableLog = false;
 let enableOpen = true;
 
-const DEFAULT_TARGET_COUNT = 3072;
+const DEFAULT_TARGET_COUNT = 4096;
 const DEFAULT_SAVE_IPS_COUNT = 100;
 let nipHost = base64Decode('bmlwLmxmcmVlLm9yZw==');
 let extraIp;
