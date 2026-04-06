@@ -2750,8 +2750,7 @@ function pageLogic() {
       });
       const textToCopy = lines.join('\\n');
       navigator.clipboard.writeText(textToCopy)
-        // .then(() => alert("✅ 已复制前 ${ saveCount } 个优选IP"))
-        .then(() => alert("✅ 已复制优选IP"))
+        .then(() => alert("✅ 已复制,优选IP"))
         .catch(() => alert("❌ 复制失败，请手动复制"));
     }
 
