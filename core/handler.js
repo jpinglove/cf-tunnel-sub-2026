@@ -65,7 +65,8 @@ let hostRemark;
 let enableLog = false;
 let enableOpen = true;
 
-const DEFAULT_TARGET_COUNT = 512;
+const DEFAULT_TARGET_COUNT = 3072;
+const DEFAULT_SAVE_IPS_COUNT = 100;
 let nipHost = base64Decode('bmlwLmxmcmVlLm9yZw==');
 let extraIp;
 let extraIpProxy;
@@ -2735,7 +2736,8 @@ function pageLogic() {
     function copyTop50(isProxy) {
       const resultTable = document.getElementById(isProxy ? 'proxyResultTable' : 'resultTable');
       const port = document.getElementById(isProxy ? 'proxyTargetPort' : 'targetPort').value;
-      const rows = Array.from(resultTable.rows).slice(0, 50);
+    //   const rows = Array.from(resultTable.rows).slice(0, DEFAULT_SAVE_IPS_COUNT);
+      const rows = Array.from(resultTable.rows); //.slice(0, DEFAULT_SAVE_IPS_COUNT);
       if (rows.length === 0) {
         alert("没有可复制的结果");
         return;
@@ -2747,7 +2749,7 @@ function pageLogic() {
       });
       const textToCopy = lines.join('\\n');
       navigator.clipboard.writeText(textToCopy)
-        .then(() => alert("✅ 已复制前 50 个优选IP"))
+        // .then(() => alert("✅ 已复制前 ${rows.length} 个优选IP"))
         .catch(() => alert("❌ 复制失败，请手动复制"));
     }
 
@@ -2756,7 +2758,8 @@ function pageLogic() {
       const resultTable = document.getElementById(isProxy ? 'proxyResultTable' : 'resultTable');
       const port = document.getElementById(isProxy ? 'proxyTargetPort' : 'targetPort').value;
       const saveStatus = document.getElementById(isProxy ? 'saveStatusProxy' : 'saveStatus');
-      const rows = Array.from(resultTable.rows).slice(0, 50);
+    //   const rows = Array.from(resultTable.rows).slice(0, DEFAULT_SAVE_IPS_COUNT);
+      const rows = Array.from(resultTable.rows); //.slice(0, DEFAULT_SAVE_IPS_COUNT);
       if (rows.length === 0) {
         saveStatus.style.color = '#f85149';
         saveStatus.textContent = '⚠ 没有可保存的结果';
@@ -2799,7 +2802,8 @@ function pageLogic() {
       const resultTable = document.getElementById(isProxy ? 'proxyResultTable' : 'resultTable');
       const port = document.getElementById(isProxy ? 'proxyTargetPort' : 'targetPort').value;
       const saveStatus = document.getElementById(isProxy ? 'saveStatusProxy' : 'saveStatus');
-      const rows = Array.from(resultTable.rows).slice(0, 50);
+    //   const rows = Array.from(resultTable.rows).slice(0, DEFAULT_SAVE_IPS_COUNT);
+      const rows = Array.from(resultTable.rows); //.slice(0, DEFAULT_SAVE_IPS_COUNT);
       if (rows.length === 0) {
         saveStatus.style.color = '#f85149';
         saveStatus.textContent = "⚠ 没有可追加的数据";
