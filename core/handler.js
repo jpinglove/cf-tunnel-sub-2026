@@ -3,6 +3,11 @@
  * Telegram : https://t.me/am_clubs
  * GitHub   : https://github.com/amclubs
  * BLog     : https://amclubss.com
+ *
+ * Note: Modified to support sing-box 1.13+ compatibility
+ * - Added classic=true&expand=false parameters for sing-box target
+ * - This avoids deprecated dns outbound in generated configuration
+ * - dns outbound was deprecated in sing-box 1.11.0 and removed in 1.13.0
  */
 
 let id = base64Decode('ZWM4NzJkOGYtNzJiMC00YTA0LWI2MTItMDMyN2Q4NWUxOGVk');
@@ -805,7 +810,20 @@ async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fa
 }
 
 function createSubConverterUrl(target, url, subConfig, subConverter, subProtocol) {
-    return `${subProtocol}://${subConverter}/sub?target=${target}&url=${encodeURIComponent(url)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
+    // Build base URL with common parameters for subconverter API
+    let baseUrl = `${subProtocol}://${subConverter}/sub?target=${target}&url=${encodeURIComponent(url)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
+
+    // For sing-box target, add parameters to generate configuration compatible with sing-box 1.13+
+    // classic=true: Use classic configuration format to avoid deprecated features
+    // expand=false: Disable rule expansion to prevent adding deprecated dns outbound
+    // These parameters help generate configuration without deprecated dns outbound
+    // which was removed in sing-box 1.13.0 (deprecated since 1.11.0)
+    if (target === 'singbox') {
+        baseUrl += '&classic=true&expand=false';
+        // append_type=true
+    }
+
+    return baseUrl;
 }
 
 function isClashCondition(userAgent, _url) {
