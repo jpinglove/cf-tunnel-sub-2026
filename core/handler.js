@@ -819,7 +819,6 @@ function createSubConverterUrl(target, url, subConfig, subConverter, subProtocol
     // Build base URL with common parameters for subconverter API
     let baseUrl = `${subProtocol}://${subConverter}/sub?target=${target}&url=${encodeURIComponent(url)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
 
-    console.log(`[createSubConverterUrl] Base URL before target-specific parameters: ${baseUrl}`);
     // For sing-box target, add parameters to generate configuration compatible with sing-box 1.13+
     // append_type=true: Append type information to generate modern configuration format
     // udp=true: Use UDP protocol for DNS (avoids deprecated legacy DNS fakeip format)
@@ -830,7 +829,6 @@ function createSubConverterUrl(target, url, subConfig, subConverter, subProtocol
     if (target === 'singbox') {
         baseUrl += '&append_type=true&udp=true&expand=false';
     }
-    console.log(`[createSubConverterUrl] Final URL for target "${target}": ${baseUrl}`);
 
     return baseUrl;
 }
