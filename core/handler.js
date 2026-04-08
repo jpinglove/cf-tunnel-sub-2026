@@ -5,9 +5,10 @@
  * BLog     : https://amclubss.com
  *
  * Note: Modified to support sing-box 1.13+ compatibility
- * - Added classic=true&expand=false parameters for sing-box target
- * - This avoids deprecated dns outbound in generated configuration
- * - dns outbound was deprecated in sing-box 1.11.0 and removed in 1.13.0
+ * - Added append_type=true&udp=true&expand=false parameters for sing-box target
+ * - This avoids deprecated features in generated configuration:
+ *   1. dns outbound (deprecated in 1.11.0, removed in 1.13.0)
+ *   2. legacy DNS fakeip options (deprecated in 1.12.0, removed in 1.14.0)
  */
 
 let id = base64Decode('ZWM4NzJkOGYtNzJiMC00YTA0LWI2MTItMDMyN2Q4NWUxOGVk');
@@ -801,6 +802,11 @@ async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fa
                 }
             });
             responseBody = await response.text();
+
+            // For sing-box configuration, validate and clean the response
+            if (isSingboxCondition(userAgent, _url)) {
+                responseBody = cleanSingboxResponse(responseBody);
+            }
         } catch (err) {
             errorLogs(`[getConfigContent][fetch error] ${err.message}`);
         }
@@ -814,13 +820,14 @@ function createSubConverterUrl(target, url, subConfig, subConverter, subProtocol
     let baseUrl = `${subProtocol}://${subConverter}/sub?target=${target}&url=${encodeURIComponent(url)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
 
     // For sing-box target, add parameters to generate configuration compatible with sing-box 1.13+
-    // classic=true: Use classic configuration format to avoid deprecated features
+    // append_type=true: Append type information to generate modern configuration format
+    // udp=true: Use UDP protocol for DNS (avoids deprecated legacy DNS fakeip format)
     // expand=false: Disable rule expansion to prevent adding deprecated dns outbound
-    // These parameters help generate configuration without deprecated dns outbound
-    // which was removed in sing-box 1.13.0 (deprecated since 1.11.0)
+    // These parameters help generate configuration without deprecated features
+    // - dns outbound was removed in sing-box 1.13.0 (deprecated since 1.11.0)
+    // - legacy DNS fakeip options deprecated in 1.12.0 (removed in 1.14.0)
     if (target === 'singbox') {
-        baseUrl += '&classic=true&expand=false';
-        // append_type=true
+        baseUrl += '&append_type=true&udp=true&expand=false';
     }
 
     return baseUrl;
@@ -832,6 +839,55 @@ function isClashCondition(userAgent, _url) {
 
 function isSingboxCondition(userAgent, _url) {
     return userAgent.includes('sing-box') || userAgent.includes('singbox') || ((_url.searchParams.has('singbox') || _url.searchParams.has('sb')) && !userAgent.includes('subConverter'));
+}
+
+/**
+ * Clean and validate sing-box configuration response
+ * Removes BOM, extra whitespace, and validates JSON format
+ * @param {string} response - Raw response from subconverter
+ * @returns {string} Cleaned sing-box configuration
+ */
+function cleanSingboxResponse(response) {
+    if (!response || typeof response !== 'string') {
+        return response;
+    }
+
+    // Remove Byte Order Mark (BOM) if present
+    if (response.charCodeAt(0) === 0xFEFF) {
+        response = response.slice(1);
+    }
+
+    // Trim whitespace from beginning and end
+    response = response.trim();
+
+    // Check if response starts with '{' (JSON object)
+    if (!response.startsWith('{')) {
+        // Try to find JSON object in the response
+        const jsonStart = response.indexOf('{');
+        if (jsonStart !== -1) {
+            response = response.slice(jsonStart);
+        }
+    }
+
+    // Check if response ends with '}' (JSON object)
+    if (!response.endsWith('}')) {
+        // Try to find the end of JSON object
+        const jsonEnd = response.lastIndexOf('}');
+        if (jsonEnd !== -1) {
+            response = response.slice(0, jsonEnd + 1);
+        }
+    }
+
+    // Try to parse JSON to validate it
+    try {
+        JSON.parse(response);
+        log('[cleanSingboxResponse] Valid JSON configuration');
+    } catch (err) {
+        errorLogs(`[cleanSingboxResponse] Invalid JSON: ${err.message}`);
+        // Return original response if JSON is invalid
+    }
+
+    return response;
 }
 
 function splitNodeData(uniqueIpTxt, noTLS, host, uuid, userAgent, protType, nat64, hostRemark) {
