@@ -2683,9 +2683,12 @@ function pageLogic() {
         selectProxy.appendChild(optionProxy);
     }
 
+    // Client-side constants (must match server-side constants)
+    const CLIENT_DEFAULT_TARGET_COUNT = 128; // Must match server-side DEFAULT_TARGET_COUNT
+
     let cancelRequested = false;
     //✅ 存所有未完成请求
-    let activeControllers = []; 
+    let activeControllers = [];
     //✅ 页面加载完毕后绑定事件
     window.addEventListener('DOMContentLoaded', () => {
       document.getElementById('testBtnNormal').addEventListener('click', startTest);
@@ -2764,7 +2767,7 @@ function pageLogic() {
 
       // Get or initialize test count from sessionStorage
       let testIndex = parseInt(sessionStorage.getItem('cf_test_index')) || 0;
-      const skip = testIndex * DEFAULT_TARGET_COUNT; // Calculate skip based on test count
+      const skip = testIndex * CLIENT_DEFAULT_TARGET_COUNT; // Calculate skip based on test count
 
       cancelBtn.disabled = false;
       cancelRequested = false;
