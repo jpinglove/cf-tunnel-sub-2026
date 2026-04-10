@@ -71,7 +71,9 @@ let hostRemark;
 let enableLog = false;
 let enableOpen = true;
 
-const DEFAULT_TARGET_COUNT = 128; // Number of IPs to fetch per test
+
+// CLIENT_DEFAULT_TARGET_COUNT 
+const DEFAULT_TARGET_COUNT = 64; // Number of IPs to fetch per test
 const MAX_GENERATED_IPS = 6144; // Maximum number of IPs to generate and cache
 const DEFAULT_SAVE_IPS_COUNT = 100;
 let nipHost = base64Decode('bmlwLmxmcmVlLm9yZw==');
@@ -232,12 +234,35 @@ export async function mainHandler({ req, url, headers, res, env }) {
         if (ipData instanceof Response) {
             ipData = await ipData.text();
         }
-        if (Array.isArray(ipData)) {
-            return new Response(JSON.stringify({ ips: ipData.filter(l => l) }), {
+
+        // Handle new return format (object with pagedIps and totalIps)
+        if (typeof ipData === 'object' && ipData !== null && !Array.isArray(ipData)) {
+            const pagedIps = ipData.pagedIps || [];
+            const totalIps = ipData.totalIps || 0;
+            return new Response(JSON.stringify({
+                ips: Array.isArray(pagedIps) ? pagedIps.filter(l => l) : [],
+                totalIps: totalIps
+            }), {
                 headers: { 'Content-Type': 'application/json' }
             })
         }
-        return new Response(JSON.stringify({ ips: ipData.split('\n').filter(l => l) }), {
+
+        // Fallback for old format (array only)
+        if (Array.isArray(ipData)) {
+            return new Response(JSON.stringify({
+                ips: ipData.filter(l => l),
+                totalIps: ipData.length
+            }), {
+                headers: { 'Content-Type': 'application/json' }
+            })
+        }
+
+        // Fallback for string format
+        const ipsArray = ipData.split('\n').filter(l => l);
+        return new Response(JSON.stringify({
+            ips: ipsArray,
+            totalIps: ipsArray.length
+        }), {
             headers: { 'Content-Type': 'application/json' }
         })
     }
@@ -1869,7 +1894,7 @@ async function getNipHost(defaultHost) {
     const rand = Math.random().toString(36).slice(2, 8);
     const sd = rand;
     const testUrl = `https://${sd}.${defaultHost}/cdn-cgi/trace?t=${Date.now()}`;
-    async function fetchWithTimeout(url, timeout = 3000) {
+    async function fetchWithTimeout(url, timeout = 4000) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeout);
         try {
@@ -1880,7 +1905,7 @@ async function getNipHost(defaultHost) {
         }
     }
     try {
-        const res = await fetchWithTimeout(testUrl, 3000);
+        const res = await fetchWithTimeout(testUrl, 4000);
         if (res.ok) {
             log(`[NIP]: ${defaultHost} (${sd})`);
             return defaultHost;
@@ -2153,8 +2178,12 @@ async function loadIpSource(ipSource, targetPort, skip = 0) {
         timestamp: now
     });
 
-    // Return paged IPs based on skip parameter
-    return getPagedIps(allIps, skip);
+    // Return paged IPs based on skip parameter along with total count
+    const pagedIps = getPagedIps(allIps, skip);
+    return {
+        pagedIps: pagedIps,
+        totalIps: allIps.length
+    };
 }
 
 /** -------------------ips rtt kv-------------------------------- */
@@ -2570,7 +2599,9 @@ function htmlPage() {
         <div id="progressBarText">尚未开始测试</div>
         <div style="margin-top: 10px; font-size: 14px; color: #666;">
           当前测试: <span id="testCount">第 1 次</span>
+          <span id="completedIpsCount" style="margin-left: 10px;">累计完成 0 IPs</span>
           <button id="resetTestCount" style="margin-left: 10px; font-size: 12px; padding: 2px 8px;">🔄 重置测试计数</button>
+          <span id="totalGeneratedIps" style="margin-left: 10px; font-weight: bold;">总IP数量: 0</span>
         </div>
         <div id="saveStatus" style="font-size:12px;color:#999;margin-top:10px;">
           HKG=中国香港, TPE=中国台湾, SJC=美国圣何塞, LAX=美国洛杉矶, SEA=美国西雅图,
@@ -2631,7 +2662,9 @@ function htmlPage() {
         <div id="proxyProgressText">尚未开始测试</div>
         <div style="margin-top: 10px; font-size: 14px; color: #666;">
           当前测试: <span id="proxyTestCount">第 1 次</span>
+          <span id="proxyCompletedIpsCount" style="margin-left: 10px;">累计完成 0 IPs</span>
           <button id="resetProxyTestCount" style="margin-left: 10px; font-size: 12px; padding: 2px 8px;">🔄 重置测试计数</button>
+          <span id="proxyTotalGeneratedIps" style="margin-left: 10px; font-weight: bold;">总IP数量: 0</span>
         </div>
         <div id="saveStatusProxy" style="font-size:12px;color:#999;margin-top:10px;">
           HKG=中国香港, TPE=中国台湾, SJC=美国圣何塞, LAX=美国洛杉矶, SEA=美国西雅图,
@@ -2684,7 +2717,7 @@ function pageLogic() {
     }
 
     // Client-side constants (must match server-side constants)
-    const CLIENT_DEFAULT_TARGET_COUNT = 128; // Must match server-side DEFAULT_TARGET_COUNT
+    const CLIENT_DEFAULT_TARGET_COUNT = 64; // Must match server-side DEFAULT_TARGET_COUNT
 
     let cancelRequested = false;
     //✅ 存所有未完成请求
@@ -2731,6 +2764,7 @@ function pageLogic() {
     // Function to update test count display
     function updateTestCountDisplay() {
       const testIndex = parseInt(sessionStorage.getItem('cf_test_index')) || 0;
+      const completedIps = testIndex * CLIENT_DEFAULT_TARGET_COUNT; // Calculate completed IPs: (testIndex) * 128
 
       // Update normal test count display
       const testCountElement = document.getElementById('testCount');
@@ -2738,10 +2772,22 @@ function pageLogic() {
         testCountElement.textContent = \`第 \${testIndex + 1} 次测试\`;
       }
 
+      // Update completed IPs count for normal test
+      const completedIpsElement = document.getElementById('completedIpsCount');
+      if (completedIpsElement) {
+        completedIpsElement.textContent = \`累计完成 \${completedIps} IPs\`;
+      }
+
       // Update proxy test count display
       const proxyTestCountElement = document.getElementById('proxyTestCount');
       if (proxyTestCountElement) {
         proxyTestCountElement.textContent = \`第 \${testIndex + 1} 次测试\`;
+      }
+
+      // Update completed IPs count for proxy test
+      const proxyCompletedIpsElement = document.getElementById('proxyCompletedIpsCount');
+      if (proxyCompletedIpsElement) {
+        proxyCompletedIpsElement.textContent = \`累计完成 \${completedIps} IPs\`;
       }
     }
 
@@ -2789,7 +2835,10 @@ function pageLogic() {
       progressText.textContent = '开始加载IP列表中...';
       
       //✅ 获取IP列表 with pagination
-      const originalIPs = await ipsFetch(selectedIPSource, selectedPort, skip);
+      const ipFetchResult = await ipsFetch(selectedIPSource, selectedPort, skip);
+      const originalIPs = ipFetchResult.ips;
+      const totalGeneratedIps = ipFetchResult.totalIps;
+
       if (!originalIPs || originalIPs.length === 0) {
         btn.disabled = false;
         btn.textContent = '开始延迟测试';
@@ -2797,6 +2846,12 @@ function pageLogic() {
         ipSourceSelect.disabled = false;
         resultSummary.textContent = '加载IP列表失败，请重试';
         return;
+      }
+
+      // Update total generated IPs display
+      const totalIpsElement = document.getElementById(isProxy ? 'proxyTotalGeneratedIps' : 'totalGeneratedIps');
+      if (totalIpsElement) {
+        totalIpsElement.textContent = \`总IP数量: \${totalGeneratedIps}\`;
       }
       //✅ 显示加载到的IP列表（右侧表格）
       tableBody.innerHTML = ''; 
@@ -2813,7 +2868,7 @@ function pageLogic() {
       resultSummary.textContent = '开始测试端口 ' + selectedPort + '...';
       currentDisplayType = 'testing';
       progressText.textContent = '开始测试中...';
-      const results = await ipBatchTest(progressFill,progressText,tableBody, ips, selectedPort, 32);
+      const results = await ipBatchTest(progressFill,progressText,tableBody, ips, selectedPort, 8); // Reduced from 32 to 8 concurrent requests
       //testResults = results.sort((a, b) => a.latency - b.latency);
       
       //✅ 显示结果
@@ -2843,7 +2898,7 @@ function pageLogic() {
     }
 
     // ✅ 批量扫描 + 最大并发控制 + 有序输出 + 可取消
-    async function ipBatchTest(progressFill, progressText, tableBody, ips, port, maxConcurrent = 32) {
+    async function ipBatchTest(progressFill, progressText, tableBody, ips, port, maxConcurrent = 8) { // Reduced default from 32 to 8
       const total = ips.length;
       const results = new Array(total).fill(null);
       let completed = 0;
@@ -2895,7 +2950,11 @@ function pageLogic() {
         .finally(() => {
           clearTimeout(timer);
           activeControllers = activeControllers.filter(c => c !== controller);
-        }).catch(err => null);
+        }).catch(err => {
+          // Silently handle AbortError and other fetch errors
+          // Don't log to console to avoid inspector.js errors
+          return null;
+        });
     }
 
     // ✅ 单个 IP 测试
@@ -2904,25 +2963,31 @@ function pageLogic() {
       const nip = ip.split('.') .map(n => Number(n).toString(16).padStart(2, '0')).join('');
       const url = 'https://' + nip + '.${nipHost}:' + port + '/cdn-cgi/trace?t=${Date.now()}';
       const start = Date.now();
-      const res = await fetchWithTimeout(url, timeout);
-      if (!res || res.status !== 200) return null;
 
-      const text = await res.text();
-      const trace = buildTrace(text);
-      if (!trace?.colo || !trace?.ip) return null;
-      const latency = Date.now() - start;
-      return {
-        ip,
-        port,
-        latency,
-        colo: trace.colo,
-        responseIP: trace.ip,
-        type: trace.ip.includes(':') || trace.ip === ip ? 'proxy' : 'official'
-      };
+      try {
+        const res = await fetchWithTimeout(url, timeout);
+        if (!res || res.status !== 200) return null;
+
+        const text = await res.text();
+        const trace = buildTrace(text);
+        if (!trace?.colo || !trace?.ip) return null;
+        const latency = Date.now() - start;
+        return {
+          ip,
+          port,
+          latency,
+          colo: trace.colo,
+          responseIP: trace.ip,
+          type: trace.ip.includes(':') || trace.ip === ip ? 'proxy' : 'official'
+        };
+      } catch (error) {
+        // Silently handle any errors during IP testing
+        return null;
+      }
     }
 
     // ✅ 自动重试 3 次
-    async function testIP(ip, port, timeout = 5000) {
+    async function testIP(ip, port, timeout = 5000) { // Increased timeout from 5000ms to 10000ms (10 seconds)
         let lastFail = null;
         for (let tryCount = 1; tryCount <= 3; tryCount++) {
             if (cancelRequested) return null;
@@ -2952,10 +3017,16 @@ function pageLogic() {
                 throw new Error('Failed to load IPs');
             }
             const data = await response.json();
-            return data.ips || [];
+            return {
+                ips: data.ips || [],
+                totalIps: data.totalIps || 0
+            };
         } catch (error) {
             console.error('加载IP列表失败:', error);
-            return [];
+            return {
+                ips: [],
+                totalIps: 0
+            };
         }
     }
 
