@@ -71,7 +71,8 @@ let hostRemark;
 let enableLog = false;
 let enableOpen = true;
 
-const DEFAULT_TARGET_COUNT = 4096;
+const DEFAULT_TARGET_COUNT = 128; // Number of IPs to fetch per test
+const MAX_GENERATED_IPS = 6144; // Maximum number of IPs to generate and cache
 const DEFAULT_SAVE_IPS_COUNT = 100;
 let nipHost = base64Decode('bmlwLmxmcmVlLm9yZw==');
 let extraIp;
@@ -223,9 +224,10 @@ export async function mainHandler({ req, url, headers, res, env }) {
     if (url.pathname === '/ipsFetch') {
         const ipSource = url.searchParams.get('ipSource');
         const port = url.searchParams.get('port') || '443';
+        const skip = parseInt(url.searchParams.get('skip')) || 0; // Get skip parameter for pagination
         nipHost = getNipHost(nipHost);
-        log(`[handler]-->nipHost: ${nipHost}`);
-        let ipData = await loadIpSource(ipSource, port);
+        log(`[handler]-->nipHost: ${nipHost}, skip: ${skip}`);
+        let ipData = await loadIpSource(ipSource, port, skip);
         log('ipData type:', typeof ipData, ipData);
         if (ipData instanceof Response) {
             ipData = await ipData.text();
@@ -1916,7 +1918,125 @@ function intToIp(int) {
 }
 
 let basePadd = '\u0068\u0074\u0074\u0070\u0073\u003a\u002f\u002f\u0072\u0061\u0077\u002e\u0067\u0069\u0074\u0068\u0075\u0062\u0075\u0073\u0065\u0072\u0063\u006f\u006e\u0074\u0065\u006e\u0074\u002e\u0063\u006f\u006d\u002f\u0061\u006d\u0063\u006c\u0075\u0062\u0073\u002f\u0061\u006d\u002d\u0063\u0066\u002d\u0074\u0075\u006e\u006e\u0065\u006c\u002f\u006d\u0061\u0069\u006e\u002f\u0065\u0078\u0061\u006d\u0070\u006c\u0065\u002f\u0070\u0072\u006f\u0078\u0079\u0069\u0070\u005f\u0061\u006d\u002e\u0074\u0078\u0074';
-async function loadIpSource(ipSource, targetPort) {
+
+// Cache for pre-generated IPs to avoid regenerating on every request
+const ipCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes cache TTL
+
+// Helper function to generate all possible IPs from CIDR blocks
+function generateAllIpsFromCidrs(cidrText, maxIps = MAX_GENERATED_IPS) {
+    const cidrList = cidrText.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const ipSet = new Set();
+
+    for (const cidr of cidrList) {
+        if (!cidr.includes('/')) continue;
+
+        const [network, prefixStr] = cidr.split('/');
+        const prefix = Number(prefixStr);
+        if (isNaN(prefix) || prefix < 0 || prefix > 32) continue;
+
+        // Convert IP to integer for calculations
+        const ipToInt = (ip) => ip.split('.').reduce((acc, octet) => (acc << 8) | Number(octet), 0) >>> 0;
+        const intToIP = (int) => `${(int >>> 24) & 255}.${(int >>> 16) & 255}.${(int >>> 8) & 255}.${int & 255}`;
+
+        const networkInt = ipToInt(network);
+        const hostBits = 32 - prefix;
+        const numHosts = (1 << hostBits) - 2; // Exclude network and broadcast addresses
+
+        if (numHosts <= 0) continue;
+
+        // Generate all host IPs in this CIDR block, up to maxIps
+        for (let offset = 1; offset <= numHosts && ipSet.size < maxIps; offset++) {
+            const ip = intToIP(networkInt + offset);
+            ipSet.add(ip);
+        }
+
+        // Stop if we've reached the maximum number of IPs
+        if (ipSet.size >= maxIps) break;
+    }
+
+    // Convert to array and shuffle with deterministic seed for consistent ordering
+    const ipArray = Array.from(ipSet);
+    shuffleWithSeed(ipArray, `ip-seed-${cidrText.length}`); // Deterministic shuffle
+
+    return ipArray;
+}
+
+// Deterministic shuffle function using Fisher-Yates algorithm with seed
+function shuffleWithSeed(array, seed) {
+    // Simple deterministic random number generator
+    function seededRandom(seedStr) {
+        let hash = 0;
+        for (let i = 0; i < seedStr.length; i++) {
+            const char = seedStr.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash; // Convert to 32-bit integer
+        }
+        let value = Math.abs(hash);
+        return function() {
+            value = (value * 9301 + 49297) % 233280;
+            return value / 233280;
+        };
+    }
+
+    const random = seededRandom(seed);
+
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+    }
+
+    return array;
+}
+
+// Helper function to get paged IPs from cached array
+function getPagedIps(ipArray, skip) {
+    const start = skip;
+    const end = skip + DEFAULT_TARGET_COUNT;
+
+    // If skip exceeds array length, wrap around
+    if (start >= ipArray.length) {
+        const actualStart = start % ipArray.length;
+        const actualEnd = Math.min(actualStart + DEFAULT_TARGET_COUNT, ipArray.length);
+
+        const firstPart = ipArray.slice(actualStart, actualEnd);
+        const remaining = DEFAULT_TARGET_COUNT - firstPart.length;
+
+        if (remaining > 0) {
+            const secondPart = ipArray.slice(0, remaining);
+            return [...firstPart, ...secondPart];
+        }
+
+        return firstPart;
+    }
+
+    // Normal paging
+    if (end <= ipArray.length) {
+        return ipArray.slice(start, end);
+    }
+
+    // Cross-boundary case: get end part + beginning part
+    const firstPart = ipArray.slice(start, ipArray.length);
+    const remaining = DEFAULT_TARGET_COUNT - firstPart.length;
+    const secondPart = ipArray.slice(0, remaining);
+
+    return [...firstPart, ...secondPart];
+}
+
+async function loadIpSource(ipSource, targetPort, skip = 0) {
+    // Cache key for this IP source
+    const cacheKey = `${ipSource}-${targetPort}`;
+    const now = Date.now();
+
+    // Check if we have valid cache for this IP source
+    if (ipCache.has(cacheKey)) {
+        const { ips, timestamp } = ipCache.get(cacheKey);
+        if (now - timestamp < CACHE_TTL) {
+            // Cache is valid, return paged IPs
+            return getPagedIps(ips, skip);
+        }
+    }
+
     async function fetchAsnPrefixes(asn) {
         log(`fetchAsnPrefixes-->asn: `, asn);
         const ipverseUrl = `\u0068\u0074\u0074\u0070\u0073\u003a\u002f\u002f\u0072\u0061\u0077\u002e\u0067\u0069\u0074\u0068\u0075\u0062\u0075\u0073\u0065\u0072\u0063\u006f\u006e\u0074\u0065\u006e\u0074\u002e\u0063\u006f\u006d\u002f\u0069\u0070\u0076\u0065\u0072\u0073\u0065\u002f\u0061\u0073\u006e\u002d\u0069\u0070\u002f\u006d\u0061\u0073\u0074\u0065\u0072\u002f\u0061\u0073\u002f${asn}\u002f\u0069\u0070\u0076\u0034\u002d\u0061\u0067\u0067\u0072\u0065\u0067\u0061\u0074\u0065\u0064\u002e\u0074\u0078\u0074`;
@@ -1997,11 +2117,15 @@ async function loadIpSource(ipSource, targetPort) {
         return Array.from(sampled);
     }
 
+    // Generate or retrieve cached IPs for this source
+    let allIps;
+
     if (ipSource === 'official') {
+        // For official Cloudflare IPs, generate from CIDR blocks
         const cfText = await fetchTextOrDefault('https://www.cloudflare.com/ips-v4/', '');
-        return sampleFromCidrs(cfText, DEFAULT_TARGET_COUNT);
-    }
-    if (ipSource === 'proxyip' || ipSource === 'extraip' || ipSource === 'extraipProxy') {
+        allIps = generateAllIpsFromCidrs(cfText, MAX_GENERATED_IPS);
+    } else if (ipSource === 'proxyip' || ipSource === 'extraip' || ipSource === 'extraipProxy') {
+        // For proxy IP sources, fetch and cache the list
         if (ipSource === 'extraip') {
             basePadd = extraIp;
         } else if (ipSource === 'extraipProxy') {
@@ -2013,14 +2137,24 @@ async function loadIpSource(ipSource, targetPort) {
                 const m = l.match(/(\d+\.\d+\.\d+\.\d+)/);
                 return m ? m[1] : null;
             }).filter(Boolean);
-        if (validIps.length > DEFAULT_TARGET_COUNT) {
-            const shuffled = validIps.sort(() => 0.5 - Math.random());
-            return shuffled.slice(0, DEFAULT_TARGET_COUNT);
-        }
-        return validIps;
+
+        // Shuffle and limit to MAX_GENERATED_IPS
+        const shuffled = validIps.sort(() => 0.5 - Math.random());
+        allIps = shuffled.slice(0, Math.min(shuffled.length, MAX_GENERATED_IPS));
+    } else {
+        // For ASN-based IP sources, generate from CIDR blocks
+        const cidrText = await fetchAsnPrefixes(ipSource);
+        allIps = generateAllIpsFromCidrs(cidrText, MAX_GENERATED_IPS);
     }
-    const cidrText = await fetchAsnPrefixes(ipSource);
-    return sampleFromCidrs(cidrText, DEFAULT_TARGET_COUNT);
+
+    // Cache the generated IPs
+    ipCache.set(cacheKey, {
+        ips: allIps,
+        timestamp: now
+    });
+
+    // Return paged IPs based on skip parameter
+    return getPagedIps(allIps, skip);
 }
 
 /** -------------------ips rtt kv-------------------------------- */
@@ -2434,6 +2568,10 @@ function htmlPage() {
         </div>
         <div id="progressBar"><div id="progressFill" class="progressFill"></div></div>
         <div id="progressBarText">尚未开始测试</div>
+        <div style="margin-top: 10px; font-size: 14px; color: #666;">
+          当前测试: <span id="testCount">第 1 次</span>
+          <button id="resetTestCount" style="margin-left: 10px; font-size: 12px; padding: 2px 8px;">🔄 重置测试计数</button>
+        </div>
         <div id="saveStatus" style="font-size:12px;color:#999;margin-top:10px;">
           HKG=中国香港, TPE=中国台湾, SJC=美国圣何塞, LAX=美国洛杉矶, SEA=美国西雅图,
           NRT=日本东京, SIN=新加坡, KIX=日本大阪, FRA=德国法兰克福, LHR=英国伦敦, SYD=澳大利亚悉尼
@@ -2491,6 +2629,10 @@ function htmlPage() {
         </div>
         <div id="proxyProgressBar"><div id="proxyProgressFill" class="progressFill"></div></div>
         <div id="proxyProgressText">尚未开始测试</div>
+        <div style="margin-top: 10px; font-size: 14px; color: #666;">
+          当前测试: <span id="proxyTestCount">第 1 次</span>
+          <button id="resetProxyTestCount" style="margin-left: 10px; font-size: 12px; padding: 2px 8px;">🔄 重置测试计数</button>
+        </div>
         <div id="saveStatusProxy" style="font-size:12px;color:#999;margin-top:10px;">
           HKG=中国香港, TPE=中国台湾, SJC=美国圣何塞, LAX=美国洛杉矶, SEA=美国西雅图,
           NRT=日本东京, SIN=新加坡, KIX=日本大阪, FRA=德国法兰克福, LHR=英国伦敦, SYD=澳大利亚悉尼
@@ -2559,7 +2701,47 @@ function pageLogic() {
       document.getElementById('saveBtnProxy').addEventListener('click', () => saveTop50(true));
       document.getElementById('appendBtnNormal').addEventListener('click', () => appendTop50(false));
       document.getElementById('appendBtnProxy').addEventListener('click', () => appendTop50(true));
+
+      // Add event listeners for reset test count buttons
+      document.getElementById('resetTestCount').addEventListener('click', resetTestCount);
+      document.getElementById('resetProxyTestCount').addEventListener('click', resetTestCount);
+
+      // Initialize test count display on page load
+      updateTestCountDisplay();
     });
+
+    // Function to reset test count
+    function resetTestCount(event) {
+      const isProxy = event.target.id === 'resetProxyTestCount';
+
+      // Reset test count in sessionStorage
+      sessionStorage.setItem('cf_test_index', '0');
+
+      // Update display
+      updateTestCountDisplay();
+
+      // Show confirmation message
+      const message = isProxy ? '代理测试计数已重置' : '普通测试计数已重置';
+      alert(message);
+    }
+
+    // Function to update test count display
+    function updateTestCountDisplay() {
+      const testIndex = parseInt(sessionStorage.getItem('cf_test_index')) || 0;
+
+      // Update normal test count display
+      const testCountElement = document.getElementById('testCount');
+      if (testCountElement) {
+        testCountElement.textContent = \`第 \${testIndex + 1} 次测试\`;
+      }
+
+      // Update proxy test count display
+      const proxyTestCountElement = document.getElementById('proxyTestCount');
+      if (proxyTestCountElement) {
+        proxyTestCountElement.textContent = \`第 \${testIndex + 1} 次测试\`;
+      }
+    }
+
     // -----------------------------------------------------------------------------//
     async function startTest(event) {
       const btn = event.target;
@@ -2580,6 +2762,10 @@ function pageLogic() {
       const selectedIPSource = ipSourceSelect.value;
       const ipSourceName = ipSourceSelect.options[ipSourceSelect.selectedIndex].text;
 
+      // Get or initialize test count from sessionStorage
+      let testIndex = parseInt(sessionStorage.getItem('cf_test_index')) || 0;
+      const skip = testIndex * DEFAULT_TARGET_COUNT; // Calculate skip based on test count
+
       cancelBtn.disabled = false;
       cancelRequested = false;
       activeControllers = [];
@@ -2588,8 +2774,8 @@ function pageLogic() {
       portSelect.disabled = true;
       ipSourceSelect.disabled = true;
       testResults = [];
-      displayedResults = []; 
-      showingAll = false; 
+      displayedResults = [];
+      showingAll = false;
       currentDisplayType = 'loading';
 
       //✅ 重置
@@ -2599,8 +2785,8 @@ function pageLogic() {
       tableBody.innerHTML = '';
       progressText.textContent = '开始加载IP列表中...';
       
-      //✅ 获取IP列表
-      const originalIPs = await ipsFetch(selectedIPSource, selectedPort);
+      //✅ 获取IP列表 with pagination
+      const originalIPs = await ipsFetch(selectedIPSource, selectedPort, skip);
       if (!originalIPs || originalIPs.length === 0) {
         btn.disabled = false;
         btn.textContent = '开始延迟测试';
@@ -2639,6 +2825,16 @@ function pageLogic() {
       portSelect.disabled = false;
       ipSourceSelect.disabled = false;
       testResults = results;
+
+      // Update test count after successful test (only if not cancelled)
+      if (!cancelRequested) {
+        testIndex++;
+        sessionStorage.setItem('cf_test_index', testIndex.toString());
+
+        // Update both test count displays
+        updateTestCountDisplay();
+      }
+
       const text = ' - 有效IP: ' + testResults.length + '/' + originalIPs.length + ' (端口: ' + selectedPort + ', IP库: ' + ipSourceName + ')';
       resultSummary.textContent = cancelRequested? '已取消' + text : '已完成'  + text;
     }
@@ -2745,10 +2941,10 @@ function pageLogic() {
         return obj;
     }
 
-    //✅ 获取IP列表
-    async function ipsFetch(ipSource, port) {
+    //✅ 获取IP列表 with pagination support
+    async function ipsFetch(ipSource, port, skip = 0) {
         try {
-            const response = await fetch(\`/ipsFetch?ipSource=\${ipSource}&port=\${port}\`, { method: 'GET'});
+            const response = await fetch(\`/ipsFetch?ipSource=\${ipSource}&port=\${port}&skip=\${skip}\`, { method: 'GET'});
             if (!response.ok) {
                 throw new Error('Failed to load IPs');
             }
