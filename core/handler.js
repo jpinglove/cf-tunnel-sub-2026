@@ -73,7 +73,7 @@ let enableOpen = true;
 
 
 // CLIENT_DEFAULT_TARGET_COUNT 
-const DEFAULT_TARGET_COUNT = 64; // Number of IPs to fetch per test
+const DEFAULT_TARGET_COUNT = 256; // Number of IPs to fetch per test
 const MAX_GENERATED_IPS = 6144; // Maximum number of IPs to generate and cache
 const DEFAULT_SAVE_IPS_COUNT = 100;
 let nipHost = base64Decode('bmlwLmxmcmVlLm9yZw==');
@@ -1998,7 +1998,7 @@ function shuffleWithSeed(array, seed) {
             hash = hash & hash; // Convert to 32-bit integer
         }
         let value = Math.abs(hash);
-        return function() {
+        return function () {
             value = (value * 9301 + 49297) % 233280;
             return value / 233280;
         };
@@ -2717,7 +2717,7 @@ function pageLogic() {
     }
 
     // Client-side constants (must match server-side constants)
-    const CLIENT_DEFAULT_TARGET_COUNT = 64; // Must match server-side DEFAULT_TARGET_COUNT
+    const CLIENT_DEFAULT_TARGET_COUNT = 256; // Must match server-side DEFAULT_TARGET_COUNT
 
     let cancelRequested = false;
     //✅ 存所有未完成请求
