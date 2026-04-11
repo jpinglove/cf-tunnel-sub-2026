@@ -74,7 +74,7 @@ let enableOpen = true;
 
 // CLIENT_DEFAULT_TARGET_COUNT 
 const DEFAULT_TARGET_COUNT = 256; // Number of IPs to fetch per test
-const MAX_GENERATED_IPS = 6144; // Maximum number of IPs to generate and cache
+const MAX_GENERATED_IPS = 8192; // Maximum number of IPs to generate and cache
 const DEFAULT_SAVE_IPS_COUNT = 100;
 let nipHost = base64Decode('bmlwLmxmcmVlLm9yZw==');
 let extraIp;
