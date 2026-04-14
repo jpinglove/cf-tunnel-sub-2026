@@ -255,7 +255,8 @@ export async function mainHandler({ req, url, headers, res, env }) {
         if (Array.isArray(ipData)) {
             return new Response(JSON.stringify({
                 ips: ipData.filter(l => l),
-                totalIps: ipData.length
+                totalIps: ipData.totalIps // 告诉前端总共有 8192 个
+                //totalIps: ipData.length
             }), {
                 headers: { 'Content-Type': 'application/json' }
             })
@@ -265,7 +266,8 @@ export async function mainHandler({ req, url, headers, res, env }) {
         const ipsArray = ipData.split('\n').filter(l => l);
         return new Response(JSON.stringify({
             ips: ipsArray,
-            totalIps: ipsArray.length
+            totalIps: ipData.totalIps // 告诉前端总共有 8192 个
+            // totalIps: ipsArray.length
         }), {
             headers: { 'Content-Type': 'application/json' }
         })
@@ -2062,7 +2064,14 @@ async function loadIpSource(ipSource, targetPort, skip = 0, count = DEFAULT_TARG
         const { ips, timestamp } = ipCache.get(cacheKey);
         if (now - timestamp < CACHE_TTL) {
             // Cache is valid, return paged IPs
-            return getPagedIps(ips, skip, count);
+            // return getPagedIps(ips, skip, count);
+            
+            // 注意这里：从缓存的 8192 个 IP 中截取当前需要的 count 个
+            const pagedIps = getPagedIps(ips, skip, count); 
+            return {
+                pagedIps: pagedIps,
+                totalIps: ips.length // 这里返回缓存池的总数 (通常是 8192)
+            };
         }
     }
 
