@@ -3056,10 +3056,10 @@ function pageLogic() {
     }
 
     //✅ 获取IP列表 with pagination support
-    async function ipsFetch(ipSource, port, skip = 0/*, count = CLIENT_DEFAULT_TARGET_COUNT*/) {
+    async function ipsFetch(ipSource, port, skip = 0, count = CLIENT_DEFAULT_TARGET_COUNT) {
         // &count=\${count}
         try {
-            const response = await fetch(\`/ipsFetch?ipSource=\${ipSource}&port=\${port}&skip=\${skip}\`, { method: 'GET'});
+            const response = await fetch(\`/ipsFetch?ipSource=\${ipSource}&port=\${port}&skip=\${skip}&count=\${count}\`, { method: 'GET'});
             if (!response.ok) {
                 throw new Error('Failed to load IPs');
             }
