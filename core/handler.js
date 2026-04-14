@@ -227,9 +227,13 @@ export async function mainHandler({ req, url, headers, res, env }) {
         const ipSource = url.searchParams.get('ipSource');
         const port = url.searchParams.get('port') || '443';
         const skip = parseInt(url.searchParams.get('skip')) || 0; // Get skip parameter for pagination
+        
+        // 新增：获取 count 参数，如果没有则默认为 256
+        const count = parseInt(url.searchParams.get('count')) || DEFAULT_TARGET_COUNT; 
+        
         nipHost = getNipHost(nipHost);
         log(`[handler]-->nipHost: ${nipHost}, skip: ${skip}`);
-        let ipData = await loadIpSource(ipSource, port, skip);
+        let ipData = await loadIpSource(ipSource, port, skip, count);
         log('ipData type:', typeof ipData, ipData);
         if (ipData instanceof Response) {
             ipData = await ipData.text();
@@ -2015,17 +2019,17 @@ function shuffleWithSeed(array, seed) {
 }
 
 // Helper function to get paged IPs from cached array
-function getPagedIps(ipArray, skip) {
+function getPagedIps(ipArray, skip, count = DEFAULT_TARGET_COUNT) {
     const start = skip;
-    const end = skip + DEFAULT_TARGET_COUNT;
+    const end = skip + count;
 
     // If skip exceeds array length, wrap around
     if (start >= ipArray.length) {
         const actualStart = start % ipArray.length;
-        const actualEnd = Math.min(actualStart + DEFAULT_TARGET_COUNT, ipArray.length);
+        const actualEnd = Math.min(actualStart + count, ipArray.length);
 
         const firstPart = ipArray.slice(actualStart, actualEnd);
-        const remaining = DEFAULT_TARGET_COUNT - firstPart.length;
+        const remaining = count - firstPart.length;
 
         if (remaining > 0) {
             const secondPart = ipArray.slice(0, remaining);
@@ -2042,13 +2046,13 @@ function getPagedIps(ipArray, skip) {
 
     // Cross-boundary case: get end part + beginning part
     const firstPart = ipArray.slice(start, ipArray.length);
-    const remaining = DEFAULT_TARGET_COUNT - firstPart.length;
+    const remaining = count - firstPart.length;
     const secondPart = ipArray.slice(0, remaining);
 
     return [...firstPart, ...secondPart];
 }
 
-async function loadIpSource(ipSource, targetPort, skip = 0) {
+async function loadIpSource(ipSource, targetPort, skip = 0, count = DEFAULT_TARGET_COUNT) {
     // Cache key for this IP source
     const cacheKey = `${ipSource}-${targetPort}`;
     const now = Date.now();
@@ -2058,7 +2062,7 @@ async function loadIpSource(ipSource, targetPort, skip = 0) {
         const { ips, timestamp } = ipCache.get(cacheKey);
         if (now - timestamp < CACHE_TTL) {
             // Cache is valid, return paged IPs
-            return getPagedIps(ips, skip);
+            return getPagedIps(ips, skip, count);
         }
     }
 
@@ -2585,6 +2589,18 @@ function htmlPage() {
               <option value="2083">2083</option>
             </select>
           </label>
+
+            <!-- 普通优选部分 -->
+            <label>数量：
+            <select id="testCountSelect">
+                <option value="64">64</option>
+                <option value="128">128</option>
+                <option value="256" selected>256</option>
+                <option value="512">512</option>
+                <option value="1024">1024</option>
+            </select>
+            </label>
+
           <!-- <label>并发：<input id="concurrency" value="20" size="3"></label>-->
         </div>
         <div>
@@ -2648,6 +2664,17 @@ function htmlPage() {
               <option value="2083">2083</option>
             </select>
           </label>
+
+          <!-- 反代优选部分 -->
+        <label>数量：
+        <select id="proxyCountSelect">
+            <option value="64">64</option>
+            <option value="128">128</option>
+            <option value="256" selected>256</option>
+            <option value="512">512</option>
+            <option value="1024">1024</option>
+        </select>
+        </label>
           <!-- <label>并发：<input id="proxyConcurrency" value="20" size="3"></label>-->
         </div>
         <div>
@@ -2764,7 +2791,12 @@ function pageLogic() {
     // Function to update test count display
     function updateTestCountDisplay() {
       const testIndex = parseInt(sessionStorage.getItem('cf_test_index')) || 0;
-      const completedIps = testIndex * CLIENT_DEFAULT_TARGET_COUNT; // Calculate completed IPs: (testIndex) * 128
+      // 获取当前页面选择的数量
+    const countSelect = document.getElementById('testCountSelect');
+    const currentCount = countSelect ? parseInt(countSelect.value) : CLIENT_DEFAULT_TARGET_COUNT;
+    const completedIps = testIndex * currentCount;
+
+    //   const completedIps = testIndex * CLIENT_DEFAULT_TARGET_COUNT; // Calculate completed IPs: (testIndex) * 128
 
       // Update normal test count display
       const testCountElement = document.getElementById('testCount');
@@ -2795,6 +2827,7 @@ function pageLogic() {
     async function startTest(event) {
       const btn = event.target;
       const isProxy = btn.id === 'testBtnProxy';
+
       const ipSourceSelect = document.getElementById(isProxy ? 'proxySource' : 'ipSource');
       const portSelect = document.querySelector(isProxy ? '#proxyTargetPort:last-of-type' : '#targetPort:first-of-type');
       const concurrencyInput = document.getElementById(isProxy ? 'proxyConcurrency' : 'concurrency');
@@ -2807,13 +2840,17 @@ function pageLogic() {
       const saveBtn = document.getElementById(isProxy ? 'saveBtnProxy' : 'saveBtnNormal');
       const appendBtn = document.getElementById(isProxy ? 'appendBtnProxy' : 'appendBtnNormal');
       
+    // 新增：获取当前选择的数量
+    const countSelect = document.getElementById(isProxy ? 'proxyCountSelect' : 'testCountSelect');
+    const currentCount = parseInt(countSelect.value);
+
       const selectedPort = portSelect.value;
       const selectedIPSource = ipSourceSelect.value;
       const ipSourceName = ipSourceSelect.options[ipSourceSelect.selectedIndex].text;
 
       // Get or initialize test count from sessionStorage
       let testIndex = parseInt(sessionStorage.getItem('cf_test_index')) || 0;
-      const skip = testIndex * CLIENT_DEFAULT_TARGET_COUNT; // Calculate skip based on test count
+      const skip = testIndex * currentCount ; // [CLIENT_DEFAULT_TARGET_COUNT] Calculate skip based on test count
 
       cancelBtn.disabled = false;
       cancelRequested = false;
@@ -2835,7 +2872,7 @@ function pageLogic() {
       progressText.textContent = '开始加载IP列表中...';
       
       //✅ 获取IP列表 with pagination
-      const ipFetchResult = await ipsFetch(selectedIPSource, selectedPort, skip);
+      const ipFetchResult = await ipsFetch(selectedIPSource, selectedPort, skip, currentCount);
       const originalIPs = ipFetchResult.ips;
       const totalGeneratedIps = ipFetchResult.totalIps;
 
@@ -3010,9 +3047,9 @@ function pageLogic() {
     }
 
     //✅ 获取IP列表 with pagination support
-    async function ipsFetch(ipSource, port, skip = 0) {
+    async function ipsFetch(ipSource, port, skip = 0, count = CLIENT_DEFAULT_TARGET_COUNT) {
         try {
-            const response = await fetch(\`/ipsFetch?ipSource=\${ipSource}&port=\${port}&skip=\${skip}\`, { method: 'GET'});
+            const response = await fetch(\`/ipsFetch?ipSource=\${ipSource}&port=\${port}&skip=\${skip}&count=\${count}\`, { method: 'GET'});
             if (!response.ok) {
                 throw new Error('Failed to load IPs');
             }
