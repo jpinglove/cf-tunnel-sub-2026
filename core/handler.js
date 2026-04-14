@@ -2183,7 +2183,7 @@ async function loadIpSource(ipSource, targetPort, skip = 0, count = DEFAULT_TARG
     });
 
     // Return paged IPs based on skip parameter along with total count
-    const pagedIps = getPagedIps(allIps, skip);
+    const pagedIps = getPagedIps(allIps, skip, count);
     return {
         pagedIps: pagedIps,
         totalIps: allIps.length
@@ -2871,8 +2871,8 @@ function pageLogic() {
       tableBody.innerHTML = '';
       progressText.textContent = '开始加载IP列表中...';
       
-      //✅ 获取IP列表 with pagination
-      const ipFetchResult = await ipsFetch(selectedIPSource, selectedPort, skip, currentCount);
+      //✅ 获取IP列表 with pagination // currentCount
+      const ipFetchResult = await ipsFetch(selectedIPSource, selectedPort, skip);
       const originalIPs = ipFetchResult.ips;
       const totalGeneratedIps = ipFetchResult.totalIps;
 
@@ -3047,9 +3047,10 @@ function pageLogic() {
     }
 
     //✅ 获取IP列表 with pagination support
-    async function ipsFetch(ipSource, port, skip = 0, count = CLIENT_DEFAULT_TARGET_COUNT) {
+    async function ipsFetch(ipSource, port, skip = 0/*, count = CLIENT_DEFAULT_TARGET_COUNT*/) {
+        // &count=\${count}
         try {
-            const response = await fetch(\`/ipsFetch?ipSource=\${ipSource}&port=\${port}&skip=\${skip}&count=\${count}\`, { method: 'GET'});
+            const response = await fetch(\`/ipsFetch?ipSource=\${ipSource}&port=\${port}&skip=\${skip}\`, { method: 'GET'});
             if (!response.ok) {
                 throw new Error('Failed to load IPs');
             }
