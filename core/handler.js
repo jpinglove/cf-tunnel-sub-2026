@@ -1024,10 +1024,15 @@ function cleanSingboxResponse(response) {
         }
 
         // Remove deprecated dns fields in route rules that reference DNS outbound
+        // Also remove rules with geoip field (removed in sing-box 1.12.0)
         if (config.route && config.route.rules && Array.isArray(config.route.rules)) {
             config.route.rules = config.route.rules.filter(rule => {
                 if (rule && rule.action === 'hijack-dns') {
                     log('[cleanSingboxResponse] Removed deprecated hijack-dns route rule');
+                    return false;
+                }
+                if (rule && rule.geoip) {
+                    log('[cleanSingboxResponse] Removed deprecated geoip route rule');
                     return false;
                 }
                 return true;
