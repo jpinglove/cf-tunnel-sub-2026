@@ -219,8 +219,8 @@ export async function mainHandler({ req, url, headers, res, env }) {
         return sendResponse(html, userAgent, res);
     }
     if (url.pathname === `/${id}/debug`) {
-        // 诊断端点: 显示生成的原始订阅内容（方便排查问题）
-        const subContent = await getConfig(rawHost, uuid, host, paddr, parsedSocks5, userAgent, url, protType, nat64, hostRemark);
+        // 诊断端点: 强制用非 Mozilla UA 获取真实订阅数据
+        const subContent = await getConfig(rawHost, uuid, host, paddr, parsedSocks5, 'CF-DEBUG-UA', url, protType, nat64, hostRemark);
         const isBase64 = isValidBase64(subContent);
         const decoded = isBase64 ? base64Decode(subContent) : subContent;
         const debugInfo = {
@@ -716,7 +716,7 @@ async function parseIpUrl(ip_url) {
 }
 
 /** ---------------------Get data------------------------------ */
-let subParams = ['sub', 'base64', 'b64', 'clash', 'singbox', 'sb'];
+let subParams = ['sub', 'base64', 'b64', 'clash', 'singbox', 'sb', 'sing-box'];
 let portSet_http = new Set([80, 8080, 8880, 2052, 2086, 2095, 2082]);
 let portSet_https = new Set([443, 8443, 2053, 2096, 2087, 2083]);
 
@@ -969,7 +969,7 @@ function isClashCondition(userAgent, _url) {
 }
 
 function isSingboxCondition(userAgent, _url) {
-    return userAgent.includes('sing-box') || userAgent.includes('singbox') || ((_url.searchParams.has('singbox') || _url.searchParams.has('sb')) && !userAgent.includes('subConverter'));
+    return userAgent.includes('sing-box') || userAgent.includes('singbox') || ((_url.searchParams.has('singbox') || _url.searchParams.has('sb') || _url.searchParams.has('sing-box')) && !userAgent.includes('subConverter'));
 }
 
 /**
@@ -1009,10 +1009,32 @@ function cleanSingboxResponse(response) {
         }
     }
 
-    // Try to parse JSON to validate it
+    // Try to parse JSON to validate and clean it
     try {
-        JSON.parse(response);
+        const config = JSON.parse(response);
         log('[cleanSingboxResponse] Valid JSON configuration');
+
+        // Remove deprecated 'dns' type outbounds (removed in sing-box 1.13.0)
+        if (config.outbounds && Array.isArray(config.outbounds)) {
+            const before = config.outbounds.length;
+            config.outbounds = config.outbounds.filter(o => o && o.type !== 'dns');
+            if (config.outbounds.length < before) {
+                log(`[cleanSingboxResponse] Removed ${before - config.outbounds.length} deprecated DNS outbound(s)`);
+            }
+        }
+
+        // Remove deprecated dns fields in route rules that reference DNS outbound
+        if (config.route && config.route.rules && Array.isArray(config.route.rules)) {
+            config.route.rules = config.route.rules.filter(rule => {
+                if (rule && rule.action === 'hijack-dns') {
+                    log('[cleanSingboxResponse] Removed deprecated hijack-dns route rule');
+                    return false;
+                }
+                return true;
+            });
+        }
+
+        response = JSON.stringify(config, null, 2);
     } catch (err) {
         errorLogs(`[cleanSingboxResponse] Invalid JSON: ${err.message}`);
         // Return original response if JSON is invalid
