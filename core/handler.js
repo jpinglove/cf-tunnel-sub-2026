@@ -983,66 +983,282 @@ function cleanSingboxResponse(response) {
         return response;
     }
 
-    // Remove Byte Order Mark (BOM) if present
-    if (response.charCodeAt(0) === 0xFEFF) {
-        response = response.slice(1);
-    }
-
-    // Trim whitespace from beginning and end
+    // Trim whitespace
     response = response.trim();
 
-    // Check if response starts with '{' (JSON object)
-    if (!response.startsWith('{')) {
-        // Try to find JSON object in the response
-        const jsonStart = response.indexOf('{');
-        if (jsonStart !== -1) {
-            response = response.slice(jsonStart);
-        }
+    // Find JSON object boundaries
+    const jsonStart = response.indexOf('{');
+    const jsonEnd = response.lastIndexOf('}');
+    if (jsonStart === -1 || jsonEnd === -1 || jsonEnd <= jsonStart) {
+        errorLogs('[cleanSingboxResponse] No valid JSON found in response');
+        return response;
     }
+    response = response.slice(jsonStart, jsonEnd + 1);
 
-    // Check if response ends with '}' (JSON object)
-    if (!response.endsWith('}')) {
-        // Try to find the end of JSON object
-        const jsonEnd = response.lastIndexOf('}');
-        if (jsonEnd !== -1) {
-            response = response.slice(0, jsonEnd + 1);
-        }
-    }
-
-    // Try to parse JSON to validate and clean it
     try {
-        const config = JSON.parse(response);
-        log('[cleanSingboxResponse] Valid JSON configuration');
+        const subConfig = JSON.parse(response);
+        log('[cleanSingboxResponse] Parsed subconverter response');
 
-        // Remove deprecated 'dns' type outbounds (removed in sing-box 1.13.0)
-        if (config.outbounds && Array.isArray(config.outbounds)) {
-            const before = config.outbounds.length;
-            config.outbounds = config.outbounds.filter(o => o && o.type !== 'dns');
-            if (config.outbounds.length < before) {
-                log(`[cleanSingboxResponse] Removed ${before - config.outbounds.length} deprecated DNS outbound(s)`);
+        // Extract proxy outbounds from subconverter response
+        const proxyOutbounds = [];
+        const systemTags = new Set(['direct', 'block', 'dns-out', 'dns']);
+        let bestPingTag = null;
+        let allVLESTags = [];
+
+        if (subConfig.outbounds && Array.isArray(subConfig.outbounds)) {
+            for (const ob of subConfig.outbounds) {
+                if (!ob || !ob.type || !ob.tag) continue;
+                // Skip deprecated dns type outbounds
+                if (ob.type === 'dns') continue;
+                // Skip system outbounds
+                if (systemTags.has(ob.tag)) continue;
+                // Collect selector-type outbounds (for their children)
+                if (ob.type === 'selector' || ob.type === 'urltest') {
+                    if (bestPingTag) continue; // skip extra selectors
+                    bestPingTag = { ...ob };
+                    // Rename to a standard name
+                    bestPingTag.tag = '🔀 Best Ping';
+                    continue;
+                }
+                // This is a proxy (VLESS/Trojan) outbound
+                proxyOutbounds.push(ob);
+                allVLESTags.push(ob.tag);
             }
         }
 
-        // Remove deprecated dns fields in route rules that reference DNS outbound
-        // Also remove rules with geoip field (removed in sing-box 1.12.0)
-        if (config.route && config.route.rules && Array.isArray(config.route.rules)) {
-            config.route.rules = config.route.rules.filter(rule => {
-                if (rule && rule.action === 'hijack-dns') {
-                    log('[cleanSingboxResponse] Removed deprecated hijack-dns route rule');
-                    return false;
-                }
-                if (rule && rule.geoip) {
-                    log('[cleanSingboxResponse] Removed deprecated geoip route rule');
-                    return false;
-                }
-                return true;
-            });
+        if (proxyOutbounds.length === 0) {
+            log('[cleanSingboxResponse] No proxy outbounds found, returning original');
+            return response;
         }
 
+        // Build the proxy tag list for Auto selector
+        const proxyTags = allVLESTags;
+
+        // Build complete sing-box config from template
+        const config = {
+            log: {
+                level: "warn",
+                timestamp: true
+            },
+            dns: {
+                servers: [
+                    {
+                        type: "https",
+                        server: "8.8.8.8",
+                        detour: "🔀 Best Ping",
+                        tag: "dns-remote"
+                    },
+                    {
+                        type: "udp",
+                        server: "8.8.8.8",
+                        server_port: 53,
+                        tag: "dns-direct"
+                    },
+                    {
+                        type: "fakeip",
+                        tag: "dns-fake",
+                        inet4_range: "198.18.0.0/15"
+                    }
+                ],
+                rules: [
+                    {
+                        domain: ["raw.githubusercontent.com"],
+                        server: "dns-direct"
+                    },
+                    {
+                        clash_mode: "Direct",
+                        server: "dns-direct"
+                    },
+                    {
+                        clash_mode: "Global",
+                        server: "dns-remote"
+                    },
+                    {
+                        disable_cache: true,
+                        inbound: "tun-in",
+                        query_type: ["A", "AAAA"],
+                        server: "dns-fake"
+                    }
+                ],
+                strategy: "ipv4_only",
+                independent_cache: true
+            },
+            inbounds: [
+                {
+                    type: "tun",
+                    tag: "tun-in",
+                    address: ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+                    mtu: 9000,
+                    auto_route: true,
+                    strict_route: true,
+                    endpoint_independent_nat: true,
+                    stack: "mixed"
+                },
+                {
+                    type: "mixed",
+                    tag: "mixed-in",
+                    listen: "0.0.0.0",
+                    listen_port: 2080
+                }
+            ],
+            outbounds: [
+                {
+                    type: "selector",
+                    tag: "🔀 Best Ping",
+                    outbounds: proxyTags
+                },
+                ...proxyOutbounds,
+                {
+                    type: "direct",
+                    tag: "direct"
+                },
+                {
+                    type: "block",
+                    tag: "block"
+                },
+                {
+                    type: "dns",
+                    tag: "dns-out"
+                }
+            ],
+            route: {
+                rules: [
+                    {
+                        ip_cidr: ["172.18.0.2"],
+                        action: "hijack-dns"
+                    },
+                    {
+                        protocol: "dns",
+                        action: "hijack-dns"
+                    },
+                    {
+                        clash_mode: "Direct",
+                        outbound: "direct"
+                    },
+                    {
+                        clash_mode: "Global",
+                        outbound: "🔀 Best Ping"
+                    },
+                    {
+                        action: "sniff"
+                    },
+                    {
+                        network: "udp",
+                        port: [443],
+                        action: "reject"
+                    },
+                    // Ads & Tracking - reject
+                    {
+                        domain_keyword: ["adservice", "doubleclick", "googlead", "adsystem", "adnxs"],
+                        outbound: "block"
+                    },
+                    // AI Services - Proxy
+                    {
+                        domain_suffix: [
+                            "chatgpt.com", "openai.com", "chat.com", "ai.com",
+                            "anthropic.com", "claude.ai",
+                            "bard.google.com", "gemini.google.com",
+                            "copilot.microsoft.com", "bing.com",
+                            "grok.com", "x.ai",
+                            "perplexity.ai",
+                            "midjourney.com",
+                            "runwayml.com",
+                            "stability.ai",
+                            "huggingface.co",
+                            "character.ai"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    },
+                    // Streaming - Proxy
+                    {
+                        domain_suffix: [
+                            "netflix.com", "nflxvideo.net", "nflximg.com",
+                            "youtube.com", "ytimg.com", "googlevideo.com",
+                            "hulu.com", "disneyplus.com", "hbomax.com",
+                            "spotify.com", "tidal.com", "applemusic.com",
+                            "twitch.tv", "vimeo.com",
+                            "primevideo.com", "amazonvideo.com"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    },
+                    // Social Media - Proxy
+                    {
+                        domain_suffix: [
+                            "twitter.com", "x.com", "t.co",
+                            "facebook.com", "fb.com", "fbcdn.net",
+                            "instagram.com", "cdninstagram.com",
+                            "telegram.org", "t.me",
+                            "whatsapp.net", "whatsapp.com",
+                            "tiktok.com", "tiktokcdn.com",
+                            "reddit.com", "redditmedia.com",
+                            "discord.com", "discordapp.com",
+                            "snapchat.com",
+                            "pinterest.com",
+                            "linkedin.com"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    },
+                    // Google Services - Proxy
+                    {
+                        domain_suffix: [
+                            "google.com", "googleapis.com", "gmail.com",
+                            "drive.google.com", "photos.google.com",
+                            "play.google.com", "maps.google.com",
+                            "translate.google.com"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    },
+                    // Gaming - Proxy
+                    {
+                        domain_suffix: [
+                            "steampowered.com", "steamcommunity.com",
+                            "epicgames.com", "unity3d.com",
+                            "origin.com", "ea.com",
+                            "xbox.com", "playstation.com",
+                            "nintendo.com"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    },
+                    // Chinese sites - Direct (for users accessing CN services)
+                    {
+                        domain_suffix: [
+                            "baidu.com", "qq.com", "weixin.qq.com",
+                            "taobao.com", "tmall.com", "jd.com",
+                            "alipay.com", "weibo.com", "zhihu.com",
+                            "bilibili.com", "douyin.com", "163.com",
+                            "sina.com", "sohu.com", "xinhuanet.com",
+                            "12306.cn", "ctrip.com", "meituan.com",
+                            "tencent.com", "aliyun.com", "netease.com"
+                        ],
+                        outbound: "direct"
+                    },
+                    // GitHub & Dev - Proxy
+                    {
+                        domain_suffix: [
+                            "github.com", "githubusercontent.com",
+                            "gitlab.com", "bitbucket.org",
+                            "stackoverflow.com", "stackexchange.com",
+                            "npmjs.com", "pypi.org", "crates.io",
+                            "docker.com", "docker.io",
+                            "cloudflare.com"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    }
+                ],
+                auto_detect_interface: true,
+                default_domain_resolver: {
+                    server: "dns-direct",
+                    strategy: "prefer_ipv4",
+                    rewrite_ttl: 60
+                }
+            }
+        };
+
         response = JSON.stringify(config, null, 2);
+        log(`[cleanSingboxResponse] Built sing-box config with ${proxyOutbounds.length} proxy nodes`);
     } catch (err) {
-        errorLogs(`[cleanSingboxResponse] Invalid JSON: ${err.message}`);
-        // Return original response if JSON is invalid
+        errorLogs(`[cleanSingboxResponse] Error: ${err.message}`);
+        // Return original response if we can't process it
     }
 
     return response;
