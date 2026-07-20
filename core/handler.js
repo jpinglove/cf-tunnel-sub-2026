@@ -21,12 +21,7 @@ let s5 = '';
 let socks5Enable = false;
 let parsedSocks5 = {};
 
-let ipLocal = [
-    'wto.org:443#youtube.com/@am_clubs 数字套利(视频教程)',
-    'icook.hk#t.me/am_clubs TG群(加入解锁更多节点)',
-    'time.is#github.com/amclubs GitHub仓库(关注查看新功能)',
-    '127.0.0.1:1234#amclubss.com 博客教程(cfnat)'
-];
+let ipLocal = [];
 
 const defaultIpUrlTxt = base64Decode('aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2FtY2x1YnMvYW0tY2YtdHVubmVsL21haW4vZXhhbXBsZS9pcHY0LnR4dA==');
 let randomNum = 25;
@@ -222,6 +217,25 @@ export async function mainHandler({ req, url, headers, res, env }) {
     if (url.pathname === `/${id}/ips`) {
         const html = await htmlPage();
         return sendResponse(html, userAgent, res);
+    }
+    if (url.pathname === `/${id}/debug`) {
+        // 诊断端点: 显示生成的原始订阅内容（方便排查问题）
+        const subContent = await getConfig(rawHost, uuid, host, paddr, parsedSocks5, userAgent, url, protType, nat64, hostRemark);
+        const isBase64 = isValidBase64(subContent);
+        const decoded = isBase64 ? base64Decode(subContent) : subContent;
+        const debugInfo = {
+            timestamp: new Date().toISOString(),
+            config: { uuid, host, id, protType, nat64, noTLS, hostRemark },
+            fakeId: { fakeUserId, fakeHostName },
+            ipSources: { ipUrlTxt, ipUrlCsvCount: ipUrlCsv?.length || 0, ipLocalCount: ipLocal.length },
+            proxyIpCount: proxyIPsAll?.length || 0,
+            subContentLength: subContent.length,
+            subContentBase64: isBase64,
+            subContentDecoded: decoded.slice(0, 2000) + (decoded.length > 2000 ? '\n... (truncated)' : '')
+        };
+        return new Response(JSON.stringify(debugInfo, null, 2), {
+            headers: { 'Content-Type': 'application/json;charset=utf-8' }
+        });
     }
     if (url.pathname === '/ipsFetch') {
         const ipSource = url.searchParams.get('ipSource');
@@ -604,12 +618,13 @@ async function getFakeUserId(userId) {
 }
 
 function getFakeHostName(host, noTLS) {
+    const subdomain = Math.random().toString(36).substring(2, 8);
     if (host.includes(".pages.dev")) {
-        return `${fakeHostName}.pages.dev`;
+        return `${subdomain}.pages.dev`;
     } else if (host.includes(".workers.dev") || host.includes("notls") || noTLS === 'true') {
-        return `${fakeHostName}.workers.dev`;
+        return `${subdomain}.workers.dev`;
     }
-    return `${fakeHostName}.xyz`;
+    return `${subdomain}.xyz`;
 }
 
 function isValidBase64(str) {
@@ -710,6 +725,7 @@ async function getConfig(rawHost, userIds, hosts, proxyIP, parsedSocks5, userAge
     log(`userIds: ${userIds} \n hosts: ${hosts} \n proxyIP: ${proxyIP} \n userAgent: ${userAgent} \n _url: ${_url} \n protTypes: ${protTypes} \n nat64: ${nat64} \n hostRemark: ${hostRemark} `);
 
     userAgent = userAgent.toLowerCase();
+    let port = 443;
 
     // Parse comma-separated hosts (supports backward-compatible single value)
     let hostList = [];
@@ -765,7 +781,7 @@ async function getConfig(rawHost, userIds, hosts, proxyIP, parsedSocks5, userAge
         const protType = protTypeList.length ? protTypeList[i] : null;
         log(`Processing host: ${host} with userId: ${userId}`);
 
-        let port = 443;
+        port = 443;
         if (host.includes('.workers.dev')) {
             port = 80;
         }
@@ -880,11 +896,15 @@ async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fa
         const responseBodyTop = splitNodeData(ipLocal, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
         protType = doubleBase64Decode(protTypeBase64Tro);
         const responseBody2 = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
-        responseBody = [responseBodyTop, responseBody1, responseBody2].join('\n');
+        responseBody = responseBodyTop
+            ? [responseBodyTop, responseBody1, responseBody2].join('\n')
+            : [responseBody1, responseBody2].join('\n');
     } else {
         const responseBodyTop = splitNodeData(ipLocal, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
         responseBody = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
-        responseBody = [responseBodyTop, responseBody].join('\n');
+        responseBody = responseBodyTop
+            ? [responseBodyTop, responseBody].join('\n')
+            : responseBody;
     }
     if (needEncode) {
         responseBody = base64Encode(responseBody);
@@ -1101,7 +1121,7 @@ async function getIpUrlTxt(urlTxts, num) {
     const controller = new AbortController();
     const timeout = setTimeout(() => {
         controller.abort();
-    }, 2000);
+    }, 5000);
 
     try {
         const urlMappings = urlTxts.map(entry => {
@@ -1159,7 +1179,7 @@ async function getIpUrlTxtToArry(urlTxts) {
 
     const timeout = setTimeout(() => {
         controller.abort();
-    }, 2000);
+    }, 5000);
 
     try {
         const responses = await Promise.allSettled(urlTxts.map(apiUrl => fetch(apiUrl, {
