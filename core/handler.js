@@ -21,6 +21,7 @@ let s5 = '';
 let socks5Enable = false;
 let parsedSocks5 = {};
 
+
 let ipLocal = [];
 
 const defaultIpUrlTxt = base64Decode('aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2FtY2x1YnMvYW0tY2YtdHVubmVsL21haW4vZXhhbXBsZS9pcHY0LnR4dA==');
