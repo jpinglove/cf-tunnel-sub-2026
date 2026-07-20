@@ -21,13 +21,7 @@ let s5 = '';
 let socks5Enable = false;
 let parsedSocks5 = {};
 
-
-let ipLocal = [
-    'wto.org:443#youtube.com/@am_clubs 数字套利(视频教程)',
-    'icook.hk#t.me/am_clubs TG群(加入解锁更多节点)',
-    'time.is#github.com/amclubs GitHub仓库(关注查看新功能)',
-    '127.0.0.1:1234#amclubss.com 博客教程(cfnat)'
-];
+let ipLocal = [];
 
 const defaultIpUrlTxt = base64Decode('aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2FtY2x1YnMvYW0tY2YtdHVubmVsL21haW4vZXhhbXBsZS9pcHY0LnR4dA==');
 let randomNum = 25;
@@ -223,6 +217,25 @@ export async function mainHandler({ req, url, headers, res, env }) {
     if (url.pathname === `/${id}/ips`) {
         const html = await htmlPage();
         return sendResponse(html, userAgent, res);
+    }
+    if (url.pathname === `/${id}/debug`) {
+        // 诊断端点: 强制用非 Mozilla UA 获取真实订阅数据
+        const subContent = await getConfig(rawHost, uuid, host, paddr, parsedSocks5, 'CF-DEBUG-UA', url, protType, nat64, hostRemark);
+        const isBase64 = isValidBase64(subContent);
+        const decoded = isBase64 ? base64Decode(subContent) : subContent;
+        const debugInfo = {
+            timestamp: new Date().toISOString(),
+            config: { uuid, host, id, protType, nat64, noTLS, hostRemark },
+            fakeId: { fakeUserId, fakeHostName },
+            ipSources: { ipUrlTxt, ipUrlCsvCount: ipUrlCsv?.length || 0, ipLocalCount: ipLocal.length },
+            proxyIpCount: proxyIPsAll?.length || 0,
+            subContentLength: subContent.length,
+            subContentBase64: isBase64,
+            subContentDecoded: decoded.slice(0, 2000) + (decoded.length > 2000 ? '\n... (truncated)' : '')
+        };
+        return new Response(JSON.stringify(debugInfo, null, 2), {
+            headers: { 'Content-Type': 'application/json;charset=utf-8' }
+        });
     }
     if (url.pathname === '/ipsFetch') {
         const ipSource = url.searchParams.get('ipSource');
@@ -605,12 +618,13 @@ async function getFakeUserId(userId) {
 }
 
 function getFakeHostName(host, noTLS) {
+    const subdomain = Math.random().toString(36).substring(2, 8);
     if (host.includes(".pages.dev")) {
-        return `${fakeHostName}.pages.dev`;
+        return `${subdomain}.pages.dev`;
     } else if (host.includes(".workers.dev") || host.includes("notls") || noTLS === 'true') {
-        return `${fakeHostName}.workers.dev`;
+        return `${subdomain}.workers.dev`;
     }
-    return `${fakeHostName}.xyz`;
+    return `${subdomain}.xyz`;
 }
 
 function isValidBase64(str) {
@@ -702,7 +716,7 @@ async function parseIpUrl(ip_url) {
 }
 
 /** ---------------------Get data------------------------------ */
-let subParams = ['sub', 'base64', 'b64', 'clash', 'singbox', 'sb'];
+let subParams = ['sub', 'base64', 'b64', 'clash', 'singbox', 'sb', 'sing-box'];
 let portSet_http = new Set([80, 8080, 8880, 2052, 2086, 2095, 2082]);
 let portSet_https = new Set([443, 8443, 2053, 2096, 2087, 2083]);
 
@@ -711,6 +725,7 @@ async function getConfig(rawHost, userIds, hosts, proxyIP, parsedSocks5, userAge
     log(`userIds: ${userIds} \n hosts: ${hosts} \n proxyIP: ${proxyIP} \n userAgent: ${userAgent} \n _url: ${_url} \n protTypes: ${protTypes} \n nat64: ${nat64} \n hostRemark: ${hostRemark} `);
 
     userAgent = userAgent.toLowerCase();
+    let port = 443;
 
     // Parse comma-separated hosts (supports backward-compatible single value)
     let hostList = [];
@@ -766,7 +781,7 @@ async function getConfig(rawHost, userIds, hosts, proxyIP, parsedSocks5, userAge
         const protType = protTypeList.length ? protTypeList[i] : null;
         log(`Processing host: ${host} with userId: ${userId}`);
 
-        let port = 443;
+        port = 443;
         if (host.includes('.workers.dev')) {
             port = 80;
         }
@@ -881,11 +896,15 @@ async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fa
         const responseBodyTop = splitNodeData(ipLocal, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
         protType = doubleBase64Decode(protTypeBase64Tro);
         const responseBody2 = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
-        responseBody = [responseBodyTop, responseBody1, responseBody2].join('\n');
+        responseBody = responseBodyTop
+            ? [responseBodyTop, responseBody1, responseBody2].join('\n')
+            : [responseBody1, responseBody2].join('\n');
     } else {
         const responseBodyTop = splitNodeData(ipLocal, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
         responseBody = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
-        responseBody = [responseBodyTop, responseBody].join('\n');
+        responseBody = responseBodyTop
+            ? [responseBodyTop, responseBody].join('\n')
+            : responseBody;
     }
     if (needEncode) {
         responseBody = base64Encode(responseBody);
@@ -901,7 +920,38 @@ async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fa
             url = createSubConverterUrl('clash', url, subConfig, subConverter, subProtocol);
         } else if (isSingboxCondition(userAgent, _url)) {
             isBase64 = false;
-            url = createSubConverterUrl('singbox', url, subConfig, subConverter, subProtocol);
+            // Generate sing-box config directly from our VLESS/Trojan links
+            try {
+                const rawContent = typeof responseBody === 'string' && isValidBase64(responseBody) ? base64Decode(responseBody) : responseBody;
+                const lines = rawContent.split('\n').filter(l => l.trim());
+                const proxyOutbounds = [];
+                const proxyTags = [];
+                const usedTags = new Set();
+                                for (const line of lines) {
+                    const parsed = parseProxyLink(line.trim());
+                    if (parsed) {
+                        const ob = toSingboxOutbound(parsed);
+                        if (ob) {
+                            // Ensure unique tag (sing-box requires unique tags)
+                            let tag = ob.tag;
+                            let ctr = 1;
+                            while (usedTags.has(tag)) {
+                                ctr++;
+                                tag = ob.tag + "_" + ctr;
+                            }
+                            usedTags.add(tag);
+                            ob.tag = tag;
+                            proxyOutbounds.push(ob);
+                            proxyTags.push(tag);
+                        }
+                    }
+                }
+                responseBody = buildSingboxConfig(proxyOutbounds, proxyTags);
+                log(`[getConfigContent][singbox] Built config with ${proxyOutbounds.length} nodes`);
+            } catch (err) {
+                errorLogs(`[getConfigContent][singbox error] ${err.message}`);
+            }
+            return responseBody;
         } else {
             return responseBody;
         }
@@ -914,11 +964,6 @@ async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fa
                 }
             });
             responseBody = await response.text();
-
-            // For sing-box configuration, validate and clean the response
-            if (isSingboxCondition(userAgent, _url)) {
-                responseBody = cleanSingboxResponse(responseBody);
-            }
         } catch (err) {
             errorLogs(`[getConfigContent][fetch error] ${err.message}`);
         }
@@ -945,12 +990,215 @@ function createSubConverterUrl(target, url, subConfig, subConverter, subProtocol
     return baseUrl;
 }
 
+// ---- Sing-box converter functions (self-generated, no external subconverter) ----
+
+function parseProxyLink(rawUrl) {
+    const url = rawUrl.trim();
+    const type = url.startsWith('vless://') ? 'vless' :
+                 url.startsWith('trojan://') ? 'trojan' :
+                 url.startsWith('vmess://') ? 'vmess' : null;
+    if (!type) return null;
+    try {
+        const u = new URL(url);
+        const params = Object.fromEntries(u.searchParams.entries());
+        return {
+            type,
+            server: u.hostname,
+            port: parseInt(u.port) || 443,
+            uuid: decodeURIComponent(u.username),
+            password: decodeURIComponent(u.password),
+            remark: u.hash ? decodeURIComponent(u.hash.substring(1)) : (u.pathname || 'Node'),
+            params
+        };
+    } catch {
+        return null;
+    }
+}
+
+function toSingboxOutbound(parsed) {
+    if (!parsed) return null;
+    const ob = {
+        tag: parsed.remark || parsed.uuid?.substring(0, 8) || 'Node',
+        server: parsed.server,
+        server_port: parsed.port
+    };
+
+    if (parsed.type === 'vless') {
+        ob.type = 'vless';
+        ob.uuid = parsed.uuid;
+        ob.flow = parsed.params.flow || "";
+        ob.packet_encoding = "xudp";
+    } else if (parsed.type === 'trojan') {
+        ob.type = 'trojan';
+        ob.password = parsed.uuid;
+    } else {
+        return null;
+    }
+
+    // TLS settings
+    const security = parsed.params.security || '';
+    const useTls = parsed.port === 443 || security === 'tls' || security === 'reality' || parsed.params.sni;
+    if (useTls) {
+        // Map v2ray utls fingerprints to sing-box values
+        const mapFingerprint = (fp) => {
+            if (!fp || fp.length < 3) return "chrome";
+            const lower = fp.toLowerCase();
+            if (lower === "randomized") return "random";
+            if (lower === "hello") return "chrome";
+            const valid = ["chrome","firefox","edge","safari","360","qq","ios","android","random"];
+            if (valid.includes(lower)) return lower;
+            return "chrome";
+        };
+        ob.tls = {
+            enabled: true,
+            server_name: parsed.params.sni || parsed.params.host || parsed.server,
+            insecure: false,
+            utls: { enabled: true, fingerprint: mapFingerprint(parsed.params.fp) }
+        };
+        // Reality support
+        if (security === 'reality' || parsed.params.pbk) {
+            ob.flow = "xtls-rprx-vision";
+            ob.tls.reality = {
+                enabled: true,
+                public_key: parsed.params.pbk || '',
+                short_id: parsed.params.sid || ''
+            };
+            if (parsed.params.fp) {
+                ob.tls.utls = ob.tls.utls || {};
+                ob.tls.utls.fingerprint = mapFingerprint(parsed.params.fp);
+            }
+        }
+    }
+    // Transport settings
+    const transportType = parsed.params.type || (parsed.type === 'vless' ? 'ws' : 'tcp');
+    if (['ws', 'grpc', 'http', 'tcp'].includes(transportType)) {
+        const transport = { type: transportType };
+        if (transportType === 'ws') {
+            transport.path = parsed.params.path || '/';
+            if (parsed.params.host) {
+                transport.headers = { Host: parsed.params.host };
+            }
+        } else if (transportType === 'grpc') {
+            transport.service_name = parsed.params.serviceName || parsed.params.path || '';
+        } else if (transportType === 'http') {
+            transport.host = [parsed.params.host || parsed.server];
+            transport.path = parsed.params.path || '/';
+        }
+        ob.transport = transport;
+    }
+
+    return ob;
+}
+
+function buildSingboxConfig(proxyOutbounds, proxyTags) {
+    if (!proxyOutbounds || proxyOutbounds.length === 0) {
+        return JSON.stringify({ log: { level: "error" }, outbounds: [] }, null, 2);
+    }
+
+    const config = {
+        log: { level: "warn", timestamp: true },
+        dns: {
+            servers: [
+                { type: "https", server: "8.8.8.8", detour: "🔀 Best Ping", tag: "dns-remote" },
+                { type: "udp", server: "8.8.8.8", server_port: 53, tag: "dns-direct" },
+                { type: "fakeip", tag: "dns-fake", inet4_range: "198.18.0.0/15" }
+            ],
+            rules: [
+                { domain: ["raw.githubusercontent.com"], server: "dns-direct" },
+                { clash_mode: "Direct", server: "dns-direct" },
+                { clash_mode: "Global", server: "dns-remote" },
+                { disable_cache: true, inbound: "tun-in", query_type: ["A", "AAAA"], server: "dns-fake" }
+            ],
+            strategy: "ipv4_only",
+            independent_cache: true
+        },
+        inbounds: [
+            {
+                type: "tun", tag: "tun-in",
+                address: ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+                mtu: 9000, auto_route: true, strict_route: true,
+                endpoint_independent_nat: true, stack: "mixed"
+            },
+            { type: "mixed", tag: "mixed-in", listen: "0.0.0.0", listen_port: 2080 }
+        ],
+        outbounds: [
+            { type: "selector", tag: "🔀 Best Ping", outbounds: proxyTags },
+            ...proxyOutbounds,
+            { type: "direct", tag: "direct" },
+            { type: "block", tag: "block" },
+            // type "dns" outbound was removed in sing-box 1.13.0 — DNS is handled via dns.rules + hijack-dns
+        ],
+        route: {
+            rules: [
+                { ip_cidr: ["172.18.0.2/32"], action: "hijack-dns" },
+                { protocol: "dns", action: "hijack-dns" },
+                { action: "route", clash_mode: "Direct", outbound: "direct" },
+                { action: "route", clash_mode: "Global", outbound: "🔀 Best Ping" },
+                { action: "sniff" },
+                { network: "udp", port: [443], action: "reject" },
+                // Ads & Malware - reject
+                { action: "route", domain_keyword: ["adservice", "doubleclick", "googlead", "adsystem", "adnxs", "malware", "phishing"], outbound: "block" },
+                // AI Services - Proxy
+                {
+                    action: "route",
+                    domain_suffix: [
+                        "chatgpt.com", "openai.com", "chat.com", "anthropic.com", "claude.ai",
+                        "bard.google.com", "gemini.google.com", "copilot.microsoft.com",
+                        "grok.com", "x.ai", "perplexity.ai", "huggingface.co"
+                    ],
+                    outbound: "🔀 Best Ping"
+                },
+                // Streaming - Proxy
+                {
+                    action: "route",
+                    domain_suffix: [
+                        "netflix.com", "nflxvideo.net", "youtube.com", "ytimg.com", "googlevideo.com",
+                        "hulu.com", "disneyplus.com", "hbomax.com", "spotify.com", "twitch.tv",
+                        "primevideo.com", "tidal.com", "applemusic.com", "vimeo.com"
+                    ],
+                    outbound: "🔀 Best Ping"
+                },
+                // Social Media - Proxy
+                {
+                    action: "route",
+                    domain_suffix: [
+                        "twitter.com", "x.com", "t.co", "facebook.com", "instagram.com",
+                        "telegram.org", "t.me", "whatsapp.net", "tiktok.com", "reddit.com",
+                        "discord.com", "snapchat.com", "linkedin.com", "pinterest.com"
+                    ],
+                    outbound: "🔀 Best Ping"
+                },
+                // Google Services - Proxy
+                { action: "route", domain_suffix: ["google.com", "googleapis.com", "gmail.com"], outbound: "🔀 Best Ping" },
+                // Gaming - Proxy
+                { action: "route", domain_suffix: ["steampowered.com", "epicgames.com", "xbox.com", "playstation.com", "nintendo.com"], outbound: "🔀 Best Ping" },
+                // Chinese sites - Direct
+                {
+                    action: "route",
+                    domain_suffix: [
+                        "baidu.com", "qq.com", "weixin.qq.com", "taobao.com", "jd.com",
+                        "alipay.com", "weibo.com", "zhihu.com", "bilibili.com",
+                        "douyin.com", "163.com", "sina.com", "tencent.com"
+                    ],
+                    outbound: "direct"
+                },
+                // GitHub & Dev - Proxy
+                { action: "route", domain_suffix: ["github.com", "githubusercontent.com", "gitlab.com", "stackoverflow.com", "docker.com", "npmjs.com", "pypi.org"], outbound: "🔀 Best Ping" }
+            ],
+            auto_detect_interface: true,
+            default_domain_resolver: { server: "dns-direct", strategy: "prefer_ipv4", rewrite_ttl: 60 }
+        }
+    };
+
+    return JSON.stringify(config, null, 2);
+}
+
 function isClashCondition(userAgent, _url) {
     return (userAgent.includes('clash') && !userAgent.includes('nekobox')) || (_url.searchParams.has('clash') && !userAgent.includes('subConverter'));
 }
 
 function isSingboxCondition(userAgent, _url) {
-    return userAgent.includes('sing-box') || userAgent.includes('singbox') || ((_url.searchParams.has('singbox') || _url.searchParams.has('sb')) && !userAgent.includes('subConverter'));
+    return userAgent.includes('sing-box') || userAgent.includes('singbox') || ((_url.searchParams.has('singbox') || _url.searchParams.has('sb') || _url.searchParams.has('sing-box')) && !userAgent.includes('subConverter'));
 }
 
 /**
@@ -964,39 +1212,289 @@ function cleanSingboxResponse(response) {
         return response;
     }
 
-    // Remove Byte Order Mark (BOM) if present
-    if (response.charCodeAt(0) === 0xFEFF) {
-        response = response.slice(1);
-    }
-
-    // Trim whitespace from beginning and end
+    // Trim whitespace
     response = response.trim();
 
-    // Check if response starts with '{' (JSON object)
-    if (!response.startsWith('{')) {
-        // Try to find JSON object in the response
-        const jsonStart = response.indexOf('{');
-        if (jsonStart !== -1) {
-            response = response.slice(jsonStart);
-        }
+    // Find JSON object boundaries
+    const jsonStart = response.indexOf('{');
+    const jsonEnd = response.lastIndexOf('}');
+    if (jsonStart === -1 || jsonEnd === -1 || jsonEnd <= jsonStart) {
+        errorLogs('[cleanSingboxResponse] No valid JSON found in response');
+        return response;
     }
+    response = response.slice(jsonStart, jsonEnd + 1);
 
-    // Check if response ends with '}' (JSON object)
-    if (!response.endsWith('}')) {
-        // Try to find the end of JSON object
-        const jsonEnd = response.lastIndexOf('}');
-        if (jsonEnd !== -1) {
-            response = response.slice(0, jsonEnd + 1);
-        }
-    }
-
-    // Try to parse JSON to validate it
     try {
-        JSON.parse(response);
-        log('[cleanSingboxResponse] Valid JSON configuration');
+        const subConfig = JSON.parse(response);
+        log('[cleanSingboxResponse] Parsed subconverter response');
+
+        // Extract proxy outbounds from subconverter response
+        const proxyOutbounds = [];
+        const systemTags = new Set(['direct', 'block', 'dns-out', 'dns']);
+        let bestPingTag = null;
+        let allVLESTags = [];
+
+        if (subConfig.outbounds && Array.isArray(subConfig.outbounds)) {
+            for (const ob of subConfig.outbounds) {
+                if (!ob || !ob.type || !ob.tag) continue;
+                // Skip deprecated dns type outbounds
+                if (ob.type === 'dns') continue;
+                // Skip system outbounds
+                if (systemTags.has(ob.tag)) continue;
+                // Collect selector-type outbounds (for their children)
+                if (ob.type === 'selector' || ob.type === 'urltest') {
+                    if (bestPingTag) continue; // skip extra selectors
+                    bestPingTag = { ...ob };
+                    // Rename to a standard name
+                    bestPingTag.tag = '🔀 Best Ping';
+                    continue;
+                }
+                // This is a proxy (VLESS/Trojan) outbound
+                proxyOutbounds.push(ob);
+                allVLESTags.push(ob.tag);
+            }
+        }
+
+        if (proxyOutbounds.length === 0) {
+            log('[cleanSingboxResponse] No proxy outbounds found, returning original');
+            return response;
+        }
+
+        // Build the proxy tag list for Auto selector
+        const proxyTags = allVLESTags;
+
+        // Build complete sing-box config from template
+        const config = {
+            log: {
+                level: "warn",
+                timestamp: true
+            },
+            dns: {
+                servers: [
+                    {
+                        type: "https",
+                        server: "8.8.8.8",
+                        detour: "🔀 Best Ping",
+                        tag: "dns-remote"
+                    },
+                    {
+                        type: "udp",
+                        server: "8.8.8.8",
+                        server_port: 53,
+                        tag: "dns-direct"
+                    },
+                    {
+                        type: "fakeip",
+                        tag: "dns-fake",
+                        inet4_range: "198.18.0.0/15"
+                    }
+                ],
+                rules: [
+                    {
+                        domain: ["raw.githubusercontent.com"],
+                        server: "dns-direct"
+                    },
+                    {
+                        clash_mode: "Direct",
+                        server: "dns-direct"
+                    },
+                    {
+                        clash_mode: "Global",
+                        server: "dns-remote"
+                    },
+                    {
+                        disable_cache: true,
+                        inbound: "tun-in",
+                        query_type: ["A", "AAAA"],
+                        server: "dns-fake"
+                    }
+                ],
+                strategy: "ipv4_only",
+                independent_cache: true
+            },
+            inbounds: [
+                {
+                    type: "tun",
+                    tag: "tun-in",
+                    address: ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+                    mtu: 9000,
+                    auto_route: true,
+                    strict_route: true,
+                    endpoint_independent_nat: true,
+                    stack: "mixed"
+                },
+                {
+                    type: "mixed",
+                    tag: "mixed-in",
+                    listen: "0.0.0.0",
+                    listen_port: 2080
+                }
+            ],
+            outbounds: [
+                {
+                    type: "selector",
+                    tag: "🔀 Best Ping",
+                    outbounds: proxyTags
+                },
+                ...proxyOutbounds,
+                {
+                    type: "direct",
+                    tag: "direct"
+                },
+                {
+                    type: "block",
+                    tag: "block"
+                },
+                // type "dns" outbound was removed in sing-box 1.13.0
+            ],
+            route: {
+                rules: [
+                    {
+                        ip_cidr: ["172.18.0.2/32"],
+                        action: "hijack-dns"
+                    },
+                    {
+                        protocol: "dns",
+                        action: "hijack-dns"
+                    },
+                    {
+                        action: "route",
+                        clash_mode: "Direct",
+                        outbound: "direct"
+                    },
+                    {
+                        action: "route",
+                        clash_mode: "Global",
+                        outbound: "🔀 Best Ping"
+                    },
+                    {
+                        action: "sniff"
+                    },
+                    {
+                        network: "udp",
+                        port: [443],
+                        action: "reject"
+                    },
+                    // Ads & Tracking - reject
+                    {
+                        action: "route",
+                        domain_keyword: ["adservice", "doubleclick", "googlead", "adsystem", "adnxs"],
+                        outbound: "block"
+                    },
+                    // AI Services - Proxy
+                    {
+                        action: "route",
+                        domain_suffix: [
+                            "chatgpt.com", "openai.com", "chat.com", "ai.com",
+                            "anthropic.com", "claude.ai",
+                            "bard.google.com", "gemini.google.com",
+                            "copilot.microsoft.com", "bing.com",
+                            "grok.com", "x.ai",
+                            "perplexity.ai",
+                            "midjourney.com",
+                            "runwayml.com",
+                            "stability.ai",
+                            "huggingface.co",
+                            "character.ai"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    },
+                    // Streaming - Proxy
+                    {
+                        action: "route",
+                        domain_suffix: [
+                            "netflix.com", "nflxvideo.net", "nflximg.com",
+                            "youtube.com", "ytimg.com", "googlevideo.com",
+                            "hulu.com", "disneyplus.com", "hbomax.com",
+                            "spotify.com", "tidal.com", "applemusic.com",
+                            "twitch.tv", "vimeo.com",
+                            "primevideo.com", "amazonvideo.com"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    },
+                    // Social Media - Proxy
+                    {
+                        action: "route",
+                        domain_suffix: [
+                            "twitter.com", "x.com", "t.co",
+                            "facebook.com", "fb.com", "fbcdn.net",
+                            "instagram.com", "cdninstagram.com",
+                            "telegram.org", "t.me",
+                            "whatsapp.net", "whatsapp.com",
+                            "tiktok.com", "tiktokcdn.com",
+                            "reddit.com", "redditmedia.com",
+                            "discord.com", "discordapp.com",
+                            "snapchat.com",
+                            "pinterest.com",
+                            "linkedin.com"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    },
+                    // Google Services - Proxy
+                    {
+                        action: "route",
+                        domain_suffix: [
+                            "google.com", "googleapis.com", "gmail.com",
+                            "drive.google.com", "photos.google.com",
+                            "play.google.com", "maps.google.com",
+                            "translate.google.com"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    },
+                    // Gaming - Proxy
+                    {
+                        action: "route",
+                        domain_suffix: [
+                            "steampowered.com", "steamcommunity.com",
+                            "epicgames.com", "unity3d.com",
+                            "origin.com", "ea.com",
+                            "xbox.com", "playstation.com",
+                            "nintendo.com"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    },
+                    // Chinese sites - Direct (for users accessing CN services)
+                    {
+                        action: "route",
+                        domain_suffix: [
+                            "baidu.com", "qq.com", "weixin.qq.com",
+                            "taobao.com", "tmall.com", "jd.com",
+                            "alipay.com", "weibo.com", "zhihu.com",
+                            "bilibili.com", "douyin.com", "163.com",
+                            "sina.com", "sohu.com", "xinhuanet.com",
+                            "12306.cn", "ctrip.com", "meituan.com",
+                            "tencent.com", "aliyun.com", "netease.com"
+                        ],
+                        outbound: "direct"
+                    },
+                    // GitHub & Dev - Proxy
+                    {
+                        action: "route",
+                        domain_suffix: [
+                            "github.com", "githubusercontent.com",
+                            "gitlab.com", "bitbucket.org",
+                            "stackoverflow.com", "stackexchange.com",
+                            "npmjs.com", "pypi.org", "crates.io",
+                            "docker.com", "docker.io",
+                            "cloudflare.com"
+                        ],
+                        outbound: "🔀 Best Ping"
+                    }
+                ],
+                auto_detect_interface: true,
+                default_domain_resolver: {
+                    server: "dns-direct",
+                    strategy: "prefer_ipv4",
+                    rewrite_ttl: 60
+                }
+            }
+        };
+
+        response = JSON.stringify(config, null, 2);
+        log(`[cleanSingboxResponse] Built sing-box config with ${proxyOutbounds.length} proxy nodes`);
     } catch (err) {
-        errorLogs(`[cleanSingboxResponse] Invalid JSON: ${err.message}`);
-        // Return original response if JSON is invalid
+        errorLogs(`[cleanSingboxResponse] Error: ${err.message}`);
+        // Return original response if we can't process it
     }
 
     return response;
@@ -1102,7 +1600,7 @@ async function getIpUrlTxt(urlTxts, num) {
     const controller = new AbortController();
     const timeout = setTimeout(() => {
         controller.abort();
-    }, 2000);
+    }, 5000);
 
     try {
         const urlMappings = urlTxts.map(entry => {
@@ -1160,7 +1658,7 @@ async function getIpUrlTxtToArry(urlTxts) {
 
     const timeout = setTimeout(() => {
         controller.abort();
-    }, 2000);
+    }, 5000);
 
     try {
         const responses = await Promise.allSettled(urlTxts.map(apiUrl => fetch(apiUrl, {
