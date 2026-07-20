@@ -920,7 +920,28 @@ async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fa
             url = createSubConverterUrl('clash', url, subConfig, subConverter, subProtocol);
         } else if (isSingboxCondition(userAgent, _url)) {
             isBase64 = false;
-            url = createSubConverterUrl('singbox', url, subConfig, subConverter, subProtocol);
+            // Generate sing-box config directly from our VLESS/Trojan links
+            try {
+                const rawContent = typeof responseBody === 'string' && isValidBase64(responseBody) ? base64Decode(responseBody) : responseBody;
+                const lines = rawContent.split('\n').filter(l => l.trim());
+                const proxyOutbounds = [];
+                const proxyTags = [];
+                for (const line of lines) {
+                    const parsed = parseProxyLink(line.trim());
+                    if (parsed) {
+                        const ob = toSingboxOutbound(parsed);
+                        if (ob) {
+                            proxyOutbounds.push(ob);
+                            proxyTags.push(ob.tag);
+                        }
+                    }
+                }
+                responseBody = buildSingboxConfig(proxyOutbounds, proxyTags);
+                log(`[getConfigContent][singbox] Built config with ${proxyOutbounds.length} nodes`);
+            } catch (err) {
+                errorLogs(`[getConfigContent][singbox error] ${err.message}`);
+            }
+            return responseBody;
         } else {
             return responseBody;
         }
@@ -933,11 +954,6 @@ async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fa
                 }
             });
             responseBody = await response.text();
-
-            // For sing-box configuration, validate and clean the response
-            if (isSingboxCondition(userAgent, _url)) {
-                responseBody = cleanSingboxResponse(responseBody);
-            }
         } catch (err) {
             errorLogs(`[getConfigContent][fetch error] ${err.message}`);
         }
@@ -962,6 +978,192 @@ function createSubConverterUrl(target, url, subConfig, subConverter, subProtocol
     }
 
     return baseUrl;
+}
+
+// ---- Sing-box converter functions (self-generated, no external subconverter) ----
+
+function parseProxyLink(rawUrl) {
+    const url = rawUrl.trim();
+    const type = url.startsWith('vless://') ? 'vless' :
+                 url.startsWith('trojan://') ? 'trojan' :
+                 url.startsWith('vmess://') ? 'vmess' : null;
+    if (!type) return null;
+    try {
+        const u = new URL(url);
+        const params = Object.fromEntries(u.searchParams.entries());
+        return {
+            type,
+            server: u.hostname,
+            port: parseInt(u.port) || 443,
+            uuid: decodeURIComponent(u.username),
+            password: decodeURIComponent(u.password),
+            remark: u.hash ? decodeURIComponent(u.hash.substring(1)) : (u.pathname || 'Node'),
+            params
+        };
+    } catch {
+        return null;
+    }
+}
+
+function toSingboxOutbound(parsed) {
+    if (!parsed) return null;
+    const ob = {
+        tag: parsed.remark || parsed.uuid?.substring(0, 8) || 'Node',
+        server: parsed.server,
+        server_port: parsed.port
+    };
+
+    if (parsed.type === 'vless') {
+        ob.type = 'vless';
+        ob.uuid = parsed.uuid;
+        ob.flow = parsed.params.flow || "";
+        ob.packet_encoding = "xudp";
+    } else if (parsed.type === 'trojan') {
+        ob.type = 'trojan';
+        ob.password = parsed.uuid;
+    } else {
+        return null;
+    }
+
+    // TLS settings
+    const security = parsed.params.security || '';
+    const useTls = parsed.port === 443 || security === 'tls' || security === 'reality' || parsed.params.sni;
+    if (useTls) {
+        ob.tls = {
+            enabled: true,
+            server_name: parsed.params.sni || parsed.params.host || parsed.server,
+            insecure: false,
+            utls: { enabled: true, fingerprint: parsed.params.fp || "chrome" }
+        };
+        // Reality support
+        if (security === 'reality' || parsed.params.pbk) {
+            ob.flow = "xtls-rprx-vision";
+            ob.tls.reality = {
+                enabled: true,
+                public_key: parsed.params.pbk || '',
+                short_id: parsed.params.sid || ''
+            };
+        }
+    }
+
+    // Transport settings
+    const transportType = parsed.params.type || (parsed.type === 'vless' ? 'ws' : 'tcp');
+    if (['ws', 'grpc', 'http', 'tcp'].includes(transportType)) {
+        const transport = { type: transportType };
+        if (transportType === 'ws') {
+            transport.path = parsed.params.path || '/';
+            if (parsed.params.host) {
+                transport.headers = { Host: parsed.params.host };
+            }
+        } else if (transportType === 'grpc') {
+            transport.service_name = parsed.params.serviceName || parsed.params.path || '';
+        } else if (transportType === 'http') {
+            transport.host = [parsed.params.host || parsed.server];
+            transport.path = parsed.params.path || '/';
+        }
+        ob.transport = transport;
+    }
+
+    return ob;
+}
+
+function buildSingboxConfig(proxyOutbounds, proxyTags) {
+    if (!proxyOutbounds || proxyOutbounds.length === 0) {
+        return JSON.stringify({ log: { level: "error" }, outbounds: [] }, null, 2);
+    }
+
+    const config = {
+        log: { level: "warn", timestamp: true },
+        dns: {
+            servers: [
+                { type: "https", server: "8.8.8.8", detour: "🔀 Best Ping", tag: "dns-remote" },
+                { type: "udp", server: "8.8.8.8", server_port: 53, tag: "dns-direct" },
+                { type: "fakeip", tag: "dns-fake", inet4_range: "198.18.0.0/15" }
+            ],
+            rules: [
+                { domain: ["raw.githubusercontent.com"], server: "dns-direct" },
+                { clash_mode: "Direct", server: "dns-direct" },
+                { clash_mode: "Global", server: "dns-remote" },
+                { disable_cache: true, inbound: "tun-in", query_type: ["A", "AAAA"], server: "dns-fake" }
+            ],
+            strategy: "ipv4_only",
+            independent_cache: true
+        },
+        inbounds: [
+            {
+                type: "tun", tag: "tun-in",
+                address: ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+                mtu: 9000, auto_route: true, strict_route: true,
+                endpoint_independent_nat: true, stack: "mixed"
+            },
+            { type: "mixed", tag: "mixed-in", listen: "0.0.0.0", listen_port: 2080 }
+        ],
+        outbounds: [
+            { type: "selector", tag: "🔀 Best Ping", outbounds: proxyTags },
+            ...proxyOutbounds,
+            { type: "direct", tag: "direct" },
+            { type: "block", tag: "block" },
+            { type: "dns", tag: "dns-out" }
+        ],
+        route: {
+            rules: [
+                { ip_cidr: ["172.18.0.2"], action: "hijack-dns" },
+                { protocol: "dns", action: "hijack-dns" },
+                { clash_mode: "Direct", outbound: "direct" },
+                { clash_mode: "Global", outbound: "🔀 Best Ping" },
+                { action: "sniff" },
+                { network: "udp", port: [443], action: "reject" },
+                // Ads & Malware - reject
+                { domain_keyword: ["adservice", "doubleclick", "googlead", "adsystem", "adnxs", "malware", "phishing"], outbound: "block" },
+                // AI Services - Proxy
+                {
+                    domain_suffix: [
+                        "chatgpt.com", "openai.com", "chat.com", "anthropic.com", "claude.ai",
+                        "bard.google.com", "gemini.google.com", "copilot.microsoft.com",
+                        "grok.com", "x.ai", "perplexity.ai", "huggingface.co"
+                    ],
+                    outbound: "🔀 Best Ping"
+                },
+                // Streaming - Proxy
+                {
+                    domain_suffix: [
+                        "netflix.com", "nflxvideo.net", "youtube.com", "ytimg.com", "googlevideo.com",
+                        "hulu.com", "disneyplus.com", "hbomax.com", "spotify.com", "twitch.tv",
+                        "primevideo.com", "tidal.com", "applemusic.com", "vimeo.com"
+                    ],
+                    outbound: "🔀 Best Ping"
+                },
+                // Social Media - Proxy
+                {
+                    domain_suffix: [
+                        "twitter.com", "x.com", "t.co", "facebook.com", "instagram.com",
+                        "telegram.org", "t.me", "whatsapp.net", "tiktok.com", "reddit.com",
+                        "discord.com", "snapchat.com", "linkedin.com", "pinterest.com"
+                    ],
+                    outbound: "🔀 Best Ping"
+                },
+                // Google Services - Proxy
+                { domain_suffix: ["google.com", "googleapis.com", "gmail.com"], outbound: "🔀 Best Ping" },
+                // Gaming - Proxy
+                { domain_suffix: ["steampowered.com", "epicgames.com", "xbox.com", "playstation.com", "nintendo.com"], outbound: "🔀 Best Ping" },
+                // Chinese sites - Direct
+                {
+                    domain_suffix: [
+                        "baidu.com", "qq.com", "weixin.qq.com", "taobao.com", "jd.com",
+                        "alipay.com", "weibo.com", "zhihu.com", "bilibili.com",
+                        "douyin.com", "163.com", "sina.com", "tencent.com"
+                    ],
+                    outbound: "direct"
+                },
+                // GitHub & Dev - Proxy
+                { domain_suffix: ["github.com", "githubusercontent.com", "gitlab.com", "stackoverflow.com", "docker.com", "npmjs.com", "pypi.org"], outbound: "🔀 Best Ping" }
+            ],
+            auto_detect_interface: true,
+            default_domain_resolver: { server: "dns-direct", strategy: "prefer_ipv4", rewrite_ttl: 60 }
+        }
+    };
+
+    return JSON.stringify(config, null, 2);
 }
 
 function isClashCondition(userAgent, _url) {
