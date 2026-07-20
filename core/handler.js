@@ -926,13 +926,23 @@ async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fa
                 const lines = rawContent.split('\n').filter(l => l.trim());
                 const proxyOutbounds = [];
                 const proxyTags = [];
-                for (const line of lines) {
+                const usedTags = new Set();
+                                for (const line of lines) {
                     const parsed = parseProxyLink(line.trim());
                     if (parsed) {
                         const ob = toSingboxOutbound(parsed);
                         if (ob) {
+                            // Ensure unique tag (sing-box requires unique tags)
+                            let tag = ob.tag;
+                            let ctr = 1;
+                            while (usedTags.has(tag)) {
+                                ctr++;
+                                tag = ob.tag + "_" + ctr;
+                            }
+                            usedTags.add(tag);
+                            ob.tag = tag;
                             proxyOutbounds.push(ob);
-                            proxyTags.push(ob.tag);
+                            proxyTags.push(tag);
                         }
                     }
                 }
@@ -1029,11 +1039,21 @@ function toSingboxOutbound(parsed) {
     const security = parsed.params.security || '';
     const useTls = parsed.port === 443 || security === 'tls' || security === 'reality' || parsed.params.sni;
     if (useTls) {
+        // Map v2ray utls fingerprints to sing-box values
+        const mapFingerprint = (fp) => {
+            if (!fp || fp.length < 3) return "chrome";
+            const lower = fp.toLowerCase();
+            if (lower === "randomized") return "random";
+            if (lower === "hello") return "chrome";
+            const valid = ["chrome","firefox","edge","safari","360","qq","ios","android","random"];
+            if (valid.includes(lower)) return lower;
+            return "chrome";
+        };
         ob.tls = {
             enabled: true,
             server_name: parsed.params.sni || parsed.params.host || parsed.server,
             insecure: false,
-            utls: { enabled: true, fingerprint: parsed.params.fp || "chrome" }
+            utls: { enabled: true, fingerprint: mapFingerprint(parsed.params.fp) }
         };
         // Reality support
         if (security === 'reality' || parsed.params.pbk) {
@@ -1043,9 +1063,12 @@ function toSingboxOutbound(parsed) {
                 public_key: parsed.params.pbk || '',
                 short_id: parsed.params.sid || ''
             };
+            if (parsed.params.fp) {
+                ob.tls.utls = ob.tls.utls || {};
+                ob.tls.utls.fingerprint = mapFingerprint(parsed.params.fp);
+            }
         }
     }
-
     // Transport settings
     const transportType = parsed.params.type || (parsed.type === 'vless' ? 'ws' : 'tcp');
     if (['ws', 'grpc', 'http', 'tcp'].includes(transportType)) {
@@ -1103,20 +1126,21 @@ function buildSingboxConfig(proxyOutbounds, proxyTags) {
             ...proxyOutbounds,
             { type: "direct", tag: "direct" },
             { type: "block", tag: "block" },
-            { type: "dns", tag: "dns-out" }
+            // type "dns" outbound was removed in sing-box 1.13.0 — DNS is handled via dns.rules + hijack-dns
         ],
         route: {
             rules: [
-                { ip_cidr: ["172.18.0.2"], action: "hijack-dns" },
+                { ip_cidr: ["172.18.0.2/32"], action: "hijack-dns" },
                 { protocol: "dns", action: "hijack-dns" },
-                { clash_mode: "Direct", outbound: "direct" },
-                { clash_mode: "Global", outbound: "🔀 Best Ping" },
+                { action: "route", clash_mode: "Direct", outbound: "direct" },
+                { action: "route", clash_mode: "Global", outbound: "🔀 Best Ping" },
                 { action: "sniff" },
                 { network: "udp", port: [443], action: "reject" },
                 // Ads & Malware - reject
-                { domain_keyword: ["adservice", "doubleclick", "googlead", "adsystem", "adnxs", "malware", "phishing"], outbound: "block" },
+                { action: "route", domain_keyword: ["adservice", "doubleclick", "googlead", "adsystem", "adnxs", "malware", "phishing"], outbound: "block" },
                 // AI Services - Proxy
                 {
+                    action: "route",
                     domain_suffix: [
                         "chatgpt.com", "openai.com", "chat.com", "anthropic.com", "claude.ai",
                         "bard.google.com", "gemini.google.com", "copilot.microsoft.com",
@@ -1126,6 +1150,7 @@ function buildSingboxConfig(proxyOutbounds, proxyTags) {
                 },
                 // Streaming - Proxy
                 {
+                    action: "route",
                     domain_suffix: [
                         "netflix.com", "nflxvideo.net", "youtube.com", "ytimg.com", "googlevideo.com",
                         "hulu.com", "disneyplus.com", "hbomax.com", "spotify.com", "twitch.tv",
@@ -1135,6 +1160,7 @@ function buildSingboxConfig(proxyOutbounds, proxyTags) {
                 },
                 // Social Media - Proxy
                 {
+                    action: "route",
                     domain_suffix: [
                         "twitter.com", "x.com", "t.co", "facebook.com", "instagram.com",
                         "telegram.org", "t.me", "whatsapp.net", "tiktok.com", "reddit.com",
@@ -1143,11 +1169,12 @@ function buildSingboxConfig(proxyOutbounds, proxyTags) {
                     outbound: "🔀 Best Ping"
                 },
                 // Google Services - Proxy
-                { domain_suffix: ["google.com", "googleapis.com", "gmail.com"], outbound: "🔀 Best Ping" },
+                { action: "route", domain_suffix: ["google.com", "googleapis.com", "gmail.com"], outbound: "🔀 Best Ping" },
                 // Gaming - Proxy
-                { domain_suffix: ["steampowered.com", "epicgames.com", "xbox.com", "playstation.com", "nintendo.com"], outbound: "🔀 Best Ping" },
+                { action: "route", domain_suffix: ["steampowered.com", "epicgames.com", "xbox.com", "playstation.com", "nintendo.com"], outbound: "🔀 Best Ping" },
                 // Chinese sites - Direct
                 {
+                    action: "route",
                     domain_suffix: [
                         "baidu.com", "qq.com", "weixin.qq.com", "taobao.com", "jd.com",
                         "alipay.com", "weibo.com", "zhihu.com", "bilibili.com",
@@ -1156,7 +1183,7 @@ function buildSingboxConfig(proxyOutbounds, proxyTags) {
                     outbound: "direct"
                 },
                 // GitHub & Dev - Proxy
-                { domain_suffix: ["github.com", "githubusercontent.com", "gitlab.com", "stackoverflow.com", "docker.com", "npmjs.com", "pypi.org"], outbound: "🔀 Best Ping" }
+                { action: "route", domain_suffix: ["github.com", "githubusercontent.com", "gitlab.com", "stackoverflow.com", "docker.com", "npmjs.com", "pypi.org"], outbound: "🔀 Best Ping" }
             ],
             auto_detect_interface: true,
             default_domain_resolver: { server: "dns-direct", strategy: "prefer_ipv4", rewrite_ttl: 60 }
@@ -1318,15 +1345,12 @@ function cleanSingboxResponse(response) {
                     type: "block",
                     tag: "block"
                 },
-                {
-                    type: "dns",
-                    tag: "dns-out"
-                }
+                // type "dns" outbound was removed in sing-box 1.13.0
             ],
             route: {
                 rules: [
                     {
-                        ip_cidr: ["172.18.0.2"],
+                        ip_cidr: ["172.18.0.2/32"],
                         action: "hijack-dns"
                     },
                     {
@@ -1334,10 +1358,12 @@ function cleanSingboxResponse(response) {
                         action: "hijack-dns"
                     },
                     {
+                        action: "route",
                         clash_mode: "Direct",
                         outbound: "direct"
                     },
                     {
+                        action: "route",
                         clash_mode: "Global",
                         outbound: "🔀 Best Ping"
                     },
@@ -1351,11 +1377,13 @@ function cleanSingboxResponse(response) {
                     },
                     // Ads & Tracking - reject
                     {
+                        action: "route",
                         domain_keyword: ["adservice", "doubleclick", "googlead", "adsystem", "adnxs"],
                         outbound: "block"
                     },
                     // AI Services - Proxy
                     {
+                        action: "route",
                         domain_suffix: [
                             "chatgpt.com", "openai.com", "chat.com", "ai.com",
                             "anthropic.com", "claude.ai",
@@ -1373,6 +1401,7 @@ function cleanSingboxResponse(response) {
                     },
                     // Streaming - Proxy
                     {
+                        action: "route",
                         domain_suffix: [
                             "netflix.com", "nflxvideo.net", "nflximg.com",
                             "youtube.com", "ytimg.com", "googlevideo.com",
@@ -1385,6 +1414,7 @@ function cleanSingboxResponse(response) {
                     },
                     // Social Media - Proxy
                     {
+                        action: "route",
                         domain_suffix: [
                             "twitter.com", "x.com", "t.co",
                             "facebook.com", "fb.com", "fbcdn.net",
@@ -1402,6 +1432,7 @@ function cleanSingboxResponse(response) {
                     },
                     // Google Services - Proxy
                     {
+                        action: "route",
                         domain_suffix: [
                             "google.com", "googleapis.com", "gmail.com",
                             "drive.google.com", "photos.google.com",
@@ -1412,6 +1443,7 @@ function cleanSingboxResponse(response) {
                     },
                     // Gaming - Proxy
                     {
+                        action: "route",
                         domain_suffix: [
                             "steampowered.com", "steamcommunity.com",
                             "epicgames.com", "unity3d.com",
@@ -1423,6 +1455,7 @@ function cleanSingboxResponse(response) {
                     },
                     // Chinese sites - Direct (for users accessing CN services)
                     {
+                        action: "route",
                         domain_suffix: [
                             "baidu.com", "qq.com", "weixin.qq.com",
                             "taobao.com", "tmall.com", "jd.com",
@@ -1436,6 +1469,7 @@ function cleanSingboxResponse(response) {
                     },
                     // GitHub & Dev - Proxy
                     {
+                        action: "route",
                         domain_suffix: [
                             "github.com", "githubusercontent.com",
                             "gitlab.com", "bitbucket.org",
