@@ -612,13 +612,27 @@ function getFakeHostName(host, noTLS) {
     return `${fakeHostName}.xyz`;
 }
 
+function isValidBase64(str) {
+    if (!str || typeof str !== 'string') return false;
+    const s = str.trim().replace(/\n/g, '');
+    if (s.length % 4 !== 0) return false;
+    const base64Regex = /^[A-Za-z0-9+/]+={0,2}$/;
+    return base64Regex.test(s);
+}
+
 function revertFakeInfo(content, userId, hostName) {
-    log(`revertFakeInfo-->: isBase64 ${isBase64} \n content: ${content}`);
-    if (isBase64) {
-        content = base64Decode(content);
+    log(`revertFakeInfo--> content length: ${content?.length}`);
+    let shouldDecode = isValidBase64(content);
+    if (shouldDecode) {
+        try {
+            content = base64Decode(content);
+        } catch (e) {
+            log("Base64 decode failed, treating as plain text.");
+            shouldDecode = false;
+        }
     }
     content = content.replace(new RegExp(fakeUserId, 'g'), userId).replace(new RegExp(fakeHostName, 'g'), hostName);
-    if (isBase64) {
+    if (shouldDecode) {
         content = base64Encode(content);
     }
     return content;
@@ -691,35 +705,97 @@ let subParams = ['sub', 'base64', 'b64', 'clash', 'singbox', 'sb'];
 let portSet_http = new Set([80, 8080, 8880, 2052, 2086, 2095, 2082]);
 let portSet_https = new Set([443, 8443, 2053, 2096, 2087, 2083]);
 
-async function getConfig(rawHost, userId, host, proxyIP, parsedSocks5, userAgent, _url, protType, nat64, hostRemark) {
+async function getConfig(rawHost, userIds, hosts, proxyIP, parsedSocks5, userAgent, _url, protTypes, nat64, hostRemark) {
     log(`------------getConfig------------------`);
-    log(`userId: ${userId} \n host: ${host} \n proxyIP: ${proxyIP} \n userAgent: ${userAgent} \n _url: ${_url} \n protType: ${protType} \n nat64: ${nat64} \n hostRemark: ${hostRemark} `);
+    log(`userIds: ${userIds} \n hosts: ${hosts} \n proxyIP: ${proxyIP} \n userAgent: ${userAgent} \n _url: ${_url} \n protTypes: ${protTypes} \n nat64: ${nat64} \n hostRemark: ${hostRemark} `);
 
     userAgent = userAgent.toLowerCase();
-    let port = 443;
-    if (host.includes('.workers.dev')) {
-        port = 80;
+
+    // Parse comma-separated hosts (supports backward-compatible single value)
+    let hostList = [];
+    if (hosts && typeof hosts === 'string' && hosts.includes(',')) {
+        hostList = hosts.split(',').map(h => h.trim()).filter(Boolean);
+    } else {
+        hostList = [hosts];
     }
 
+    // Parse comma-separated userIds
+    let userIdList = [];
+    if (userIds && typeof userIds === 'string' && userIds.includes(',')) {
+        userIdList = userIds.split(',').map(u => u.trim()).filter(Boolean);
+    } else {
+        userIdList = [userIds];
+    }
+    // Broadcast single userId to all hosts, or validate count match
+    if (userIdList.length === 1) {
+        userIdList = Array(hostList.length).fill(userIdList[0]);
+    } else if (userIdList.length !== hostList.length) {
+        throw new Error(`userId count (${userIdList.length}) does not match hosts count (${hostList.length})`);
+    }
+
+    // Parse comma-separated protTypes
+    let protTypeList = [];
+    if (protTypes && typeof protTypes === 'string' && protTypes.includes(',')) {
+        protTypeList = protTypes.split(',').map(u => u.trim()).filter(Boolean);
+    } else if (protTypes) {
+        protTypeList = [protTypes];
+    }
+    if (protTypeList.length === 1) {
+        protTypeList = Array(hostList.length).fill(protTypeList[0]);
+    } else if (protTypeList.length > 1 && protTypeList.length !== hostList.length) {
+        throw new Error(`protType count (${protTypeList.length}) does not match hosts count (${hostList.length})`);
+    }
+
+    // Early return for Mozilla/browser clients (use first host's config)
     if (userAgent.includes('mozilla') && !subParams.some(param => _url.searchParams.has(param))) {
-        if (!protType) {
-            protType = doubleBase64Decode(protTypeBase64);
+        const firstProtType = protTypeList.length ? protTypeList[0] : protTypes;
+        const finalProtType = firstProtType || doubleBase64Decode(protTypeBase64);
+        const [v2, clash] = getConfigLink(userIdList[0] || userIds, hostList[0] || hosts, hostList[0] || hosts, port, hostList[0] || hosts, proxyIP, finalProtType, nat64);
+        return getHtmlRes(rawHost, proxyIP, socks5Enable, parsedSocks5, hostList[0] || hosts, v2, clash);
+    }
+
+    // Determine if multi-segment merge is needed
+    const multiHost = hostList.length > 1;
+
+    // Collect subscription content for each host/user/protocol combination
+    const allPlain = [];
+    for (let i = 0; i < hostList.length; i++) {
+        const host = hostList[i];
+        const userId = userIdList[i];
+        const protType = protTypeList.length ? protTypeList[i] : null;
+        log(`Processing host: ${host} with userId: ${userId}`);
+
+        let port = 443;
+        if (host.includes('.workers.dev')) {
+            port = 80;
         }
-        const [v2, clash] = getConfigLink(userId, host, host, port, host, proxyIP, protType, nat64);
-        return getHtmlRes(rawHost, proxyIP, socks5Enable, parsedSocks5, host, v2, clash);
+
+        // Preserve existing randomNum logic
+        let num = randomNum || 25;
+        if (protType && !randomNum) {
+            num = num * 2;
+        }
+
+        const ipUrlTxtAndCsv = await getIpUrlTxtAndCsv(noTLS, ipUrlTxt, ipUrlCsv, num);
+        log(`txt: ${ipUrlTxtAndCsv.txt} \n csv: ${ipUrlTxtAndCsv.csv}`);
+
+        // When merging multiple hosts, pass needEncode=false (encoding deferred to merge step)
+        let content = await getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fakeUserId, noTLS, ipUrlTxtAndCsv.txt, ipUrlTxtAndCsv.csv, protType, nat64, hostRemark, proxyIP, !multiHost);
+        content = _url.pathname === `/${fakeUserId}` ? content : revertFakeInfo(content, userId, host);
+        allPlain.push(content.trim());
     }
 
-    let num = randomNum || 25;
-    if (protType && !randomNum) {
-        num = num * 2;
+    // Single host: return as-is (backward compatible - getConfigContent already encoded)
+    if (!multiHost) {
+        return allPlain[0];
     }
 
-    const ipUrlTxtAndCsv = await getIpUrlTxtAndCsv(noTLS, ipUrlTxt, ipUrlCsv, num);
-
-    log(`txt: ${ipUrlTxtAndCsv.txt} \n csv: ${ipUrlTxtAndCsv.csv}`);
-    let content = await getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fakeUserId, noTLS, ipUrlTxtAndCsv.txt, ipUrlTxtAndCsv.csv, protType, nat64, hostRemark);
-
-    return _url.pathname === `/${fakeUserId}` ? content : revertFakeInfo(content, userId, host);
+    // Multi-host: merge all segments and apply appropriate encoding
+    const merged = allPlain.join('\n');
+    if (!isClashCondition(userAgent, _url) && !isSingboxCondition(userAgent, _url)) {
+        return base64Encode(merged);
+    }
+    return merged;
 }
 
 function getHtmlRes(rawHost, proxyIP, socks5Enable, parsedSocks5, host, v2, clash) {
@@ -793,24 +869,26 @@ function getCLinkConfig(protType, host, address, port, uuid, path, tls, fp) {
     return `- {type: ${xDe(t, k)}, name: ${host}, server: ${xDe(a, k)}, port: ${xDe(p, k)}, password: ${xDe(u, k)}, network: ${network}, tls: ${tls[1]}, udp: false, sni: ${host}, client-fingerprint: ${fp}, skip-cert-verify: true,  ws-opts: {path: ${path}, headers: {Host: ${host}}}}`;
 }
 
-async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fakeUserId, noTLS, ipUrlTxt, ipUrlCsv, protType, nat64, hostRemark) {
+async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fakeUserId, noTLS, ipUrlTxt, ipUrlCsv, protType, nat64, hostRemark, proxyIP, needEncode = true) {
     log(`------------getConfigContent------------------`);
     const uniqueIpTxt = [...new Set([...ipUrlTxt, ...ipUrlCsv])];
     let responseBody;
     log(`[getConfigContent]---> protType: ${protType}`);
     if (!protType) {
         protType = doubleBase64Decode(protTypeBase64);
-        const responseBody1 = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark);
-        const responseBodyTop = splitNodeData(ipLocal, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark);
+        const responseBody1 = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
+        const responseBodyTop = splitNodeData(ipLocal, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
         protType = doubleBase64Decode(protTypeBase64Tro);
-        const responseBody2 = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark);
+        const responseBody2 = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
         responseBody = [responseBodyTop, responseBody1, responseBody2].join('\n');
     } else {
-        const responseBodyTop = splitNodeData(ipLocal, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark);
-        responseBody = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark);
+        const responseBodyTop = splitNodeData(ipLocal, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
+        responseBody = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
         responseBody = [responseBodyTop, responseBody].join('\n');
     }
-    responseBody = base64Encode(responseBody);
+    if (needEncode) {
+        responseBody = base64Encode(responseBody);
+    }
 
     if (!userAgent.includes(('CF-FAKE-UA').toLowerCase())) {
         const safeHost = (rawHost || '').replace(/^https?:\/\//, '');
@@ -923,7 +1001,7 @@ function cleanSingboxResponse(response) {
     return response;
 }
 
-function splitNodeData(uniqueIpTxt, noTLS, host, uuid, userAgent, protType, nat64, hostRemark) {
+function splitNodeData(uniqueIpTxt, noTLS, host, uuid, userAgent, protType, nat64, hostRemark, proxyIP) {
     log(`splitNodeData----> \n host: ${host} \n uuid: ${uuid} \n protType: ${protType} \n hostRemark: ${hostRemark}`);
 
     const regionMap = {
@@ -987,7 +1065,7 @@ function splitNodeData(uniqueIpTxt, noTLS, host, uuid, userAgent, protType, nat6
             remarks = regionMap[rmKey];
         }
 
-        proxyip = proxyip || paddr;
+        proxyip = proxyip || proxyIP || paddr;
         log(`splitNodeData--final--> \n address: ${address} \n port: ${port} \n remarks: ${remarks} \n proxyip: ${proxyip}`);
 
         if (noTLS !== 'true' && portSet_http.has(parseInt(port))) {
