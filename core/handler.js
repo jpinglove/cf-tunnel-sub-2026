@@ -1023,11 +1023,15 @@ function cleanSingboxResponse(response) {
             }
         }
 
-        // Remove deprecated dns fields in route rules that reference DNS outbound
+        // NOTE: hijack-dns route rules are VALID in sing-box 1.13+
+        // DNS outbound was removed in 1.13.0, DNS is now handled via
+        // route rules with action: "hijack-dns". Do NOT remove them.
+        // Only filter out broken rules that reference a non-existent DNS outbound.
         if (config.route && config.route.rules && Array.isArray(config.route.rules)) {
             config.route.rules = config.route.rules.filter(rule => {
-                if (rule && rule.action === 'hijack-dns') {
-                    log('[cleanSingboxResponse] Removed deprecated hijack-dns route rule');
+                // Remove rules that reference a dns-type outbound that no longer exists
+                if (rule && rule.action === 'route' && rule.outbound === 'dns-out') {
+                    log('[cleanSingboxResponse] Removed route rule referencing deprecated dns-out');
                     return false;
                 }
                 return true;
