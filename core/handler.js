@@ -11,7 +11,7 @@
  *   2. legacy DNS fakeip options (deprecated in 1.12.0, removed in 1.14.0)
  */
 
-let id = base64Decode('ZWM4NzJkOGYtNzJiMC00YTA0LWI2MTItMDMyN2Q4NWUxOGVk');
+let id = base64Decode('amF2YWoyZWU=');
 let uuid;
 let host;
 
