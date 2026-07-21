@@ -1,5 +1,6 @@
 import { mainHandler } from './core/handler.js';
 
+
 export default {
   async fetch(request, env) {
       try {
