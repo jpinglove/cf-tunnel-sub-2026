@@ -2909,9 +2909,10 @@ function pageLogic() {
     // Function to reset test count
     function resetTestCount(event) {
       const isProxy = event.target.id === 'resetProxyTestCount';
+      const storageKey = isProxy ? 'cf_test_skip_proxy' : 'cf_test_skip_normal';
 
-      // Reset test count in sessionStorage
-      sessionStorage.setItem('cf_test_index', '0');
+      // Reset cumulative skip counter
+      sessionStorage.setItem(storageKey, '0');
 
       // Update display
       updateTestCountDisplay();
@@ -2923,36 +2924,34 @@ function pageLogic() {
 
     // Function to update test count display
     function updateTestCountDisplay() {
-      const testIndex = parseInt(sessionStorage.getItem('cf_test_index')) || 0;
-      // 获取当前页面选择的数量
-    const countSelect = document.getElementById('testCountSelect');
-    const currentCount = countSelect ? parseInt(countSelect.value) : CLIENT_DEFAULT_TARGET_COUNT;
-    const completedIps = testIndex * currentCount;
+      // --- Normal test display ---
+      const normalSkipped = parseInt(sessionStorage.getItem('cf_test_skip_normal')) || 0;
+      const normalCountSelect = document.getElementById('testCountSelect');
+      const normalCount = normalCountSelect ? parseInt(normalCountSelect.value) : CLIENT_DEFAULT_TARGET_COUNT;
+      const normalBatch = normalCount > 0 ? Math.floor(normalSkipped / normalCount) + 1 : 1;
 
-    //   const completedIps = testIndex * CLIENT_DEFAULT_TARGET_COUNT; // Calculate completed IPs: (testIndex) * 128
-
-      // Update normal test count display
       const testCountElement = document.getElementById('testCount');
       if (testCountElement) {
-        testCountElement.textContent = \`第 \${testIndex + 1} 次测试\`;
+        testCountElement.textContent = \`第 \${normalBatch} 次测试\`;
       }
-
-      // Update completed IPs count for normal test
       const completedIpsElement = document.getElementById('completedIpsCount');
       if (completedIpsElement) {
-        completedIpsElement.textContent = \`累计完成 \${completedIps} IPs\`;
+        completedIpsElement.textContent = \`累计完成 \${normalSkipped} IPs\`;
       }
 
-      // Update proxy test count display
+      // --- Proxy test display ---
+      const proxySkipped = parseInt(sessionStorage.getItem('cf_test_skip_proxy')) || 0;
+      const proxyCountSelect = document.getElementById('proxyCountSelect');
+      const proxyCount = proxyCountSelect ? parseInt(proxyCountSelect.value) : CLIENT_DEFAULT_TARGET_COUNT;
+      const proxyBatch = proxyCount > 0 ? Math.floor(proxySkipped / proxyCount) + 1 : 1;
+
       const proxyTestCountElement = document.getElementById('proxyTestCount');
       if (proxyTestCountElement) {
-        proxyTestCountElement.textContent = \`第 \${testIndex + 1} 次测试\`;
+        proxyTestCountElement.textContent = \`第 \${proxyBatch} 次测试\`;
       }
-
-      // Update completed IPs count for proxy test
       const proxyCompletedIpsElement = document.getElementById('proxyCompletedIpsCount');
       if (proxyCompletedIpsElement) {
-        proxyCompletedIpsElement.textContent = \`累计完成 \${completedIps} IPs\`;
+        proxyCompletedIpsElement.textContent = \`累计完成 \${proxySkipped} IPs\`;
       }
     }
 
@@ -2981,9 +2980,10 @@ function pageLogic() {
       const selectedIPSource = ipSourceSelect.value;
       const ipSourceName = ipSourceSelect.options[ipSourceSelect.selectedIndex].text;
 
-      // Get or initialize test count from sessionStorage
-      let testIndex = parseInt(sessionStorage.getItem('cf_test_index')) || 0;
-      const skip = testIndex * currentCount ; // [CLIENT_DEFAULT_TARGET_COUNT] Calculate skip based on test count
+      // Get or initialize cumulative skip from sessionStorage
+      const storageKey = isProxy ? 'cf_test_skip_proxy' : 'cf_test_skip_normal';
+      let cumulativeSkipped = parseInt(sessionStorage.getItem(storageKey)) || 0;
+      const skip = cumulativeSkipped; // Continue from where last test stopped
 
       cancelBtn.disabled = false;
       cancelRequested = false;
@@ -3005,7 +3005,7 @@ function pageLogic() {
       progressText.textContent = '开始加载IP列表中...';
       
       //✅ 获取IP列表 with pagination // currentCount
-      const ipFetchResult = await ipsFetch(selectedIPSource, selectedPort, skip);
+      const ipFetchResult = await ipsFetch(selectedIPSource, selectedPort, skip, currentCount);
       const originalIPs = ipFetchResult.ips;
       const totalGeneratedIps = ipFetchResult.totalIps;
 
@@ -3054,10 +3054,10 @@ function pageLogic() {
       ipSourceSelect.disabled = false;
       testResults = results;
 
-      // Update test count after successful test (only if not cancelled)
+      // Update cumulative skip after successful test (only if not cancelled)
       if (!cancelRequested) {
-        testIndex++;
-        sessionStorage.setItem('cf_test_index', testIndex.toString());
+        cumulativeSkipped += currentCount;
+        sessionStorage.setItem(storageKey, cumulativeSkipped.toString());
 
         // Update both test count displays
         updateTestCountDisplay();
