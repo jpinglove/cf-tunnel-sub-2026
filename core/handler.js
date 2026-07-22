@@ -105,6 +105,8 @@ export async function mainHandler({ req, url, headers, res, env }) {
     id = getEnvVar('ID', env) || ID || id;
     uuid = url.searchParams.get('UUID') || getEnvVar('UUID', env) || UUID;
     host = url.searchParams.get('HOST') || getEnvVar('HOST', env) || HOST;
+    // 净化 HOST：去除协议前缀、路径、端口，确保 sni/host 字段为纯域名
+    host = sanitizeHost(host);
     log(`[mainHandler]-->id: ${id} uuid: ${uuid} host: ${host}`);
 
     s5 = url.searchParams.get('SOCKS5') || getEnvVar('SOCKS5', env) || SOCKS5 || s5;
@@ -921,10 +923,30 @@ function getConfigLink(uuid, host, address, port, remarks, proxyip, protType, na
     return [v2, clash];
 }
 
+/**
+ * 净化 HOST 值为纯域名格式：
+ * - 去除 http:// 或 https:// 协议前缀
+ * - 去除尾部斜杠及路径部分
+ * - 去除端口部分
+ * 防止用户在 HOST 变量中误填完整 URL 导致 sni/host 参数无效
+ */
+function sanitizeHost(host) {
+    if (!host) return host;
+    // 去除协议前缀 http:// 或 https://
+    host = host.replace(/^https?:\/\//, '');
+    // 去除尾部斜杠及路径部分（取第一个 / 前的部分）
+    host = host.split('/')[0];
+    // 去除端口部分（取第一个 : 前的部分）
+    host = host.split(':')[0];
+    return host;
+}
+
 function getv2LinkConfig({ protType, host, uuid, address, port, remarks, ep, path, fp, tls }) {
     log(`------------getv2LinkConfig------------------`);
     log(`protType: ${protType} \n host: ${host} \n uuid: ${uuid} \n address: ${address} \n port: ${port} \n remarks: ${remarks} \n ep: ${ep} \n path: ${path} \n fp: ${fp} \n tls: ${tls} `);
 
+    // 净化 HOST：确保 sni 和 WebSocket host 字段为纯域名
+    host = sanitizeHost(host);
     let sAndp = `&sni=${host}&fp=${fp}`;
     if (portSet_http.has(parseInt(port))) {
         tls = ['', false];
@@ -943,6 +965,10 @@ function getv2LinkConfig({ protType, host, uuid, address, port, remarks, ep, pat
 function getCLinkConfig(protType, host, address, port, uuid, path, tls, fp) {
     log(`------------getCLinkConfig------------------`);
     log(`protType: ${protType} \n host: ${host} \n address: ${address} \n port: ${port} \n uuid: ${uuid} \n path: ${path} \n tls: ${tls} \n fp: ${fp} `);
+
+    // 净化 HOST：确保 sni 和 WebSocket host 字段为纯域名
+    host = sanitizeHost(host);
+
     const k = 'idc';
     const t = xEn(protType, k);
     const u = xEn(uuid, k);
