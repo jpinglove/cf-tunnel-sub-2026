@@ -216,7 +216,19 @@ export async function mainHandler({ req, url, headers, res, env }) {
     // ✅
     if (url.pathname === `/${id}/ips`) {
         const html = await htmlPage();
-        return sendResponse(html, userAgent, res);
+        // 防止浏览器缓存 HTML/JS（页面内容包含动态 JS）
+        if (res && typeof res.setHeader === 'function') {
+            res.setHeader('Content-Type', 'text/html;charset=utf-8');
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            if (typeof res.status === 'function') return res.status(200).send(html);
+            res.writeHead(200, { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate' });
+            res.end(html);
+            return;
+        }
+        return new Response(html, {
+            status: 200,
+            headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate' }
+        });
     }
     if (url.pathname === `/${id}/debug`) {
         // 诊断端点: 强制用非 Mozilla UA 获取真实订阅数据
@@ -243,8 +255,9 @@ export async function mainHandler({ req, url, headers, res, env }) {
         const skip = parseInt(url.searchParams.get('skip')) || 0; // Get skip parameter for pagination
         
         // 新增：获取 count 参数，如果没有则默认为 256
-        const count = parseInt(url.searchParams.get('count')) || DEFAULT_TARGET_COUNT; 
-        
+        const count = parseInt(url.searchParams.get('count')) || DEFAULT_TARGET_COUNT;
+        log(`[ipsFetch] count=${count}, skip=${skip}, ipSource=${ipSource}`);
+
         nipHost = getNipHost(nipHost);
         log(`[handler]-->nipHost: ${nipHost}, skip: ${skip}`);
         let ipData = await loadIpSource(ipSource, port, skip, count);
@@ -3005,7 +3018,10 @@ function pageLogic() {
       progressText.textContent = '开始加载IP列表中...';
       
       //✅ 获取IP列表 with pagination // currentCount
+      console.log('[优选] 选择数量:', currentCount, 'skip:', skip);
+      console.log('[优选] 请求URL:', \`/ipsFetch?ipSource=\${selectedIPSource}&port=\${selectedPort}&skip=\${skip}&count=\${currentCount}\`);
       const ipFetchResult = await ipsFetch(selectedIPSource, selectedPort, skip, currentCount);
+      console.log('[优选] 返回IP数:', ipFetchResult.ips?.length, '总池:', ipFetchResult.totalIps);
       const originalIPs = ipFetchResult.ips;
       const totalGeneratedIps = ipFetchResult.totalIps;
 
@@ -3031,7 +3047,7 @@ function pageLogic() {
         row.innerHTML = '<td>' + (i + 1) + '</td><td>' + ip + '</td><td>-</td><td>-</td>';
         tableBody.appendChild(row);
       });
-      resultSummary.textContent = '已加载 ips.length  个 IP，准备开始测试...';
+      resultSummary.textContent = \`已加载 \${ips.length} 个 IP，准备开始测试...\`;
         
       //✅ 开始测试
       btn.textContent = '测试中...';
