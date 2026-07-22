@@ -262,36 +262,45 @@ export async function mainHandler({ req, url, headers, res, env }) {
             });
         }
 
-        // 编码 IP 为十六进制（与前端的编码一致）
+        // 将 IP 编码为十六进制，用于通配符 DNS 子域名
+        // 例: 103.21.244.244 → 67.15.f4.f4 → 6715f4f4
         const nip = ip.split('.').map(n => Number(n).toString(16).padStart(2, '0')).join('');
-        const testUrl = `http://${nip}.${nipHost}:${port}/cdn-cgi/trace?t=${Date.now()}`;
 
-        try {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), timeout);
-            const start = Date.now();
-            const res = await fetch(testUrl, { signal: controller.signal });
-            clearTimeout(timer);
+        // 通配符 DNS 服务备用列表（通过 HTTP 测试，避免 SSL 问题）
+        // sslip.io 是目前活跃维护的服务，nip.io 由 sslip.io 提供支持
+        const wildcardServices = ['sslip.io', 'nip.io', 'xip.io'];
 
-            if (res.status !== 200) {
-                return new Response(JSON.stringify({ error: `HTTP ${res.status}` }), {
+        let lastError = '';
+        for (const service of wildcardServices) {
+            try {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), timeout);
+                const start = Date.now();
+                const testUrl = `http://${nip}.${service}:${port}/cdn-cgi/trace?t=${Date.now()}`;
+                const res = await fetch(testUrl, { signal: controller.signal });
+                clearTimeout(timer);
+
+                if (res.status !== 200) {
+                    lastError = `HTTP_${res.status} (${service})`;
+                    continue;
+                }
+
+                const text = await res.text();
+                const latency = Date.now() - start;
+                return new Response(JSON.stringify({ text, latency }), {
                     status: 200,
                     headers: { 'Content-Type': 'application/json' }
                 });
+            } catch (err) {
+                lastError = `${err.name || 'FetchError'} (${service})`;
+                continue;
             }
-
-            const text = await res.text();
-            const latency = Date.now() - start;
-            return new Response(JSON.stringify({ text, latency }), {
-                status: 200,
-                headers: { 'Content-Type': 'application/json' }
-            });
-        } catch (err) {
-            return new Response(JSON.stringify({ error: err.name || 'FetchError' }), {
-                status: 200,
-                headers: { 'Content-Type': 'application/json' }
-            });
         }
+
+        return new Response(JSON.stringify({ error: lastError }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+        });
     }
     if (url.pathname === '/ipsFetch') {
         const ipSource = url.searchParams.get('ipSource');
@@ -2077,10 +2086,10 @@ function renderPage({ base64Title, suffix = '', heading, bodyContent, ytName, tg
 
 /** -------------------ips rtt-------------------------------- */
 async function getNipHost(defaultHost) {
-    const fallbackHost = base64Decode('Y2xvdWRmbGFyZS5jb20=');
+    // 通配符 DNS 服务备用列表（sslip.io 活跃维护，nip.io 由 sslip.io 提供支持）
+    const wildcardServices = ['sslip.io', 'nip.io'];
     const rand = Math.random().toString(36).slice(2, 8);
-    const sd = rand;
-    const testUrl = `http://${sd}.${defaultHost}/cdn-cgi/trace?t=${Date.now()}`;
+
     async function fetchWithTimeout(url, timeout = 4000) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeout);
@@ -2091,19 +2100,37 @@ async function getNipHost(defaultHost) {
             clearTimeout(timer);
         }
     }
+
+    // 先尝试配置的默认域名（如 env NIP_HOST 或 nip.lfree.org）
     try {
+        const testUrl = `http://${rand}.${defaultHost}/cdn-cgi/trace?t=${Date.now()}`;
         const res = await fetchWithTimeout(testUrl, 4000);
         if (res.ok) {
-            log(`[NIP]: ${defaultHost} (${sd})`);
+            log(`[NIP]: using ${defaultHost} (${rand})`);
             return defaultHost;
-        } else {
-            log(`[NIP] returned ${res.status}, using fallback`);
-            return fallbackHost;
         }
     } catch (err) {
-        errorLogs(`[NIP] unreachable (${err.name}: ${err.message}), fallback to ${fallbackHost}`);
-        return fallbackHost;
+        errorLogs(`[NIP] ${defaultHost} unreachable: ${err.name}`);
     }
+
+    // 遍历备用通配符 DNS 服务
+    for (const service of wildcardServices) {
+        try {
+            const testUrl = `http://${rand}.${service}/cdn-cgi/trace?t=${Date.now()}`;
+            const res = await fetchWithTimeout(testUrl, 4000);
+            if (res.ok) {
+                log(`[NIP]: using fallback ${service} (${rand})`);
+                return service;
+            }
+        } catch (err) {
+            errorLogs(`[NIP] ${service} unreachable: ${err.name}`);
+            continue;
+        }
+    }
+
+    // 全部失败，返回 sslip.io 作为默认
+    errorLogs(`[NIP] all wildcard services unreachable, defaulting to sslip.io`);
+    return 'sslip.io';
 }
 
 async function fetchTextOrDefault(url, fallback = '') {
