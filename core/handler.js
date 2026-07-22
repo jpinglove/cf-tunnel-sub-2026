@@ -2771,6 +2771,14 @@ function htmlPage() {
           </label>
           <label>端口：
             <select id="targetPort">
+              <option value="80" selected>80 (HTTP)</option>
+              <option value="8080">8080</option>
+              <option value="8880">8880</option>
+              <option value="2052">2052</option>
+              <option value="2086">2086</option>
+              <option value="2095">2095</option>
+              <option value="2082">2082</option>
+              <optgroup label="—— HTTPS ——"></optgroup>
               <option value="443">443</option>
               <option value="8443">8443</option>
               <option value="2053">2053</option>
@@ -2846,6 +2854,14 @@ function htmlPage() {
           </label>
           <label>端口：
             <select id="proxyTargetPort">
+              <option value="80" selected>80 (HTTP)</option>
+              <option value="8080">8080</option>
+              <option value="8880">8880</option>
+              <option value="2052">2052</option>
+              <option value="2086">2086</option>
+              <option value="2095">2095</option>
+              <option value="2082">2082</option>
+              <optgroup label="—— HTTPS ——"></optgroup>
               <option value="443">443</option>
               <option value="8443">8443</option>
               <option value="2053">2053</option>
