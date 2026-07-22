@@ -250,6 +250,49 @@ export async function mainHandler({ req, url, headers, res, env }) {
             headers: { 'Content-Type': 'application/json;charset=utf-8' }
         });
     }
+    if (url.pathname === '/ipsTest') {
+        const ip = url.searchParams.get('ip');
+        const port = url.searchParams.get('port') || '80';
+        const timeout = parseInt(url.searchParams.get('timeout')) || 4000;
+
+        if (!ip) {
+            return new Response(JSON.stringify({ error: 'missing ip' }), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+
+        // 编码 IP 为十六进制（与前端的编码一致）
+        const nip = ip.split('.').map(n => Number(n).toString(16).padStart(2, '0')).join('');
+        const testUrl = `http://${nip}.${nipHost}:${port}/cdn-cgi/trace?t=${Date.now()}`;
+
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeout);
+            const start = Date.now();
+            const res = await fetch(testUrl, { signal: controller.signal });
+            clearTimeout(timer);
+
+            if (res.status !== 200) {
+                return new Response(JSON.stringify({ error: `HTTP ${res.status}` }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }
+
+            const text = await res.text();
+            const latency = Date.now() - start;
+            return new Response(JSON.stringify({ text, latency }), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        } catch (err) {
+            return new Response(JSON.stringify({ error: err.name || 'FetchError' }), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+    }
     if (url.pathname === '/ipsFetch') {
         const ipSource = url.searchParams.get('ipSource');
         const port = url.searchParams.get('port') || '443';
@@ -3144,19 +3187,19 @@ function pageLogic() {
         });
     }
 
-    // ✅ 单个 IP 测试
+    // ✅ 单个 IP 测试（通过 Worker 中继，避免混合内容阻止）
     async function runTest(ip, port, timeout) {
       if (cancelRequested) return null;
-      const nip = ip.split('.') .map(n => Number(n).toString(16).padStart(2, '0')).join('');
-      const url = 'http://' + nip + '.${nipHost}:' + port + '/cdn-cgi/trace?t=' + Date.now();
       const start = Date.now();
 
       try {
-        const res = await fetchWithTimeout(url, timeout);
+        const relayUrl = '/ipsTest?ip=' + encodeURIComponent(ip) + '&port=' + encodeURIComponent(port) + '&timeout=' + timeout;
+        const res = await fetchWithTimeout(relayUrl, timeout + 2000);
         if (!res || res.status !== 200) return null;
 
-        const text = await res.text();
-        const trace = buildTrace(text);
+        const data = await res.json();
+        if (!data || !data.text) return null;
+        const trace = buildTrace(data.text);
         if (!trace?.colo || !trace?.ip) return null;
         const latency = Date.now() - start;
         return {
