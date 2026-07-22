@@ -215,6 +215,7 @@ export async function mainHandler({ req, url, headers, res, env }) {
     }
     // ✅
     if (url.pathname === `/${id}/ips`) {
+        nipHost = await getNipHost(nipHost);
         const html = await htmlPage();
         // 防止浏览器缓存 HTML/JS（页面内容包含动态 JS）
         if (res && typeof res.setHeader === 'function') {
@@ -2033,10 +2034,10 @@ function renderPage({ base64Title, suffix = '', heading, bodyContent, ytName, tg
 
 /** -------------------ips rtt-------------------------------- */
 async function getNipHost(defaultHost) {
-    const fallbackHost = base64Decode('NTUzNTU4Lnh5eg==');
+    const fallbackHost = base64Decode('Y2xvdWRmbGFyZS5jb20=');
     const rand = Math.random().toString(36).slice(2, 8);
     const sd = rand;
-    const testUrl = `https://${sd}.${defaultHost}/cdn-cgi/trace?t=${Date.now()}`;
+    const testUrl = `http://${sd}.${defaultHost}/cdn-cgi/trace?t=${Date.now()}`;
     async function fetchWithTimeout(url, timeout = 4000) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeout);
@@ -3147,7 +3148,7 @@ function pageLogic() {
     async function runTest(ip, port, timeout) {
       if (cancelRequested) return null;
       const nip = ip.split('.') .map(n => Number(n).toString(16).padStart(2, '0')).join('');
-      const url = 'https://' + nip + '.${nipHost}:' + port + '/cdn-cgi/trace?t=${Date.now()}';
+      const url = 'http://' + nip + '.${nipHost}:' + port + '/cdn-cgi/trace?t=' + Date.now();
       const start = Date.now();
 
       try {
