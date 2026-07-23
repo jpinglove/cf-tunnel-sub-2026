@@ -194,6 +194,63 @@ export async function mainHandler({ req, url, headers, res, env }) {
     fakeHostName = getFakeHostName(rawHost, noTLS);
     log(`[handler]-->fakeUserId: ${fakeUserId}`);
 
+    // ✅ itdog.cn 中国境内可达性验证
+    // 从中国大陆多个节点 TCPing 测试 IP:端口，判断该 IP 是否从中国可达
+    async function checkCnReachability(ip, port) {
+        const cnTestTimeout = 15000; // itdog.cn 单次超时 15s
+        const apiUrl = `https://itdog.cn/api/tcping?url=${encodeURIComponent(ip)}&port=${encodeURIComponent(port)}&type=tcp`;
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), cnTestTimeout);
+            const cnRes = await fetch(apiUrl, { signal: controller.signal });
+            clearTimeout(timer);
+            if (!cnRes.ok) return { reachable: false, detail: `HTTP_${cnRes.status}`, nodeCount: 0, aliveCount: 0 };
+
+            const cnData = await cnRes.json();
+            // 尝试解析 itdog.cn 常见返回格式
+            let nodes = [];
+            if (cnData.data?.reslist) {
+                nodes = cnData.data.reslist;
+            } else if (Array.isArray(cnData.data)) {
+                nodes = cnData.data;
+            } else if (cnData.reslist) {
+                nodes = cnData.reslist;
+            } else if (Array.isArray(cnData)) {
+                nodes = cnData;
+            }
+            if (nodes.length === 0) return { reachable: false, detail: 'no_nodes', nodeCount: 0, aliveCount: 0 };
+
+            const alive = nodes.filter(n => n.alive === true || (typeof n.time === 'string' && n.time !== '超时' && n.time !== 'timeout' && !n.time.startsWith('-') && n.time !== ''));
+            const reachable = (alive.length / nodes.length) >= 0.8; // ≥80% 节点通才算可达
+            // 计算平均延迟（从 alive 节点中提取毫秒数）
+            let avgLatency = 0;
+            const latencyValues = [];
+            for (const n of alive) {
+                if (typeof n.time === 'string' && n.time.includes('ms')) {
+                    const val = parseFloat(n.time.replace('ms', '').trim());
+                    if (!isNaN(val) && val > 0 && val < 10000) latencyValues.push(val);
+                } else if (typeof n.time === 'number' && n.time > 0) {
+                    latencyValues.push(n.time);
+                }
+            }
+            if (latencyValues.length > 0) {
+                avgLatency = Math.round(latencyValues.reduce((a, b) => a + b, 0) / latencyValues.length);
+            }
+            const lossRate = nodes.length > 0 ? Math.round((1 - alive.length / nodes.length) * 100) : 100;
+            return {
+                reachable,
+                detail: reachable ? 'ok' : `low_connectivity(${alive.length}/${nodes.length})`,
+                nodeCount: nodes.length,
+                aliveCount: alive.length,
+                avgLatency,       // 中国节点平均延迟（ms）
+                lossRate,         // 丢包率（百分比）
+                isCnVerified: true
+            };
+        } catch (err) {
+            return { reachable: false, detail: `${err.name || 'CnError'}`, nodeCount: 0, aliveCount: 0 };
+        }
+    }
+
     // ---------------- 路由 ----------------
     if (url.pathname === `/setting` && !enableOpen) {
         const html = await getSettingHtml(rawHost);
@@ -264,6 +321,7 @@ export async function mainHandler({ req, url, headers, res, env }) {
         const port = url.searchParams.get('port') || '80';
         const timeout = parseInt(url.searchParams.get('timeout')) || 3000;
         const userHost = url.searchParams.get('host');
+        const verifyCn = url.searchParams.get('verify_cn') === 'true';
 
         if (!ip) {
             return new Response(JSON.stringify({ error: 'missing ip' }), {
@@ -300,6 +358,14 @@ export async function mainHandler({ req, url, headers, res, env }) {
                         });
                     }
                     const latency = Date.now() - start;
+                    // Phase 2: 如果启用中国验证，调用 itdog.cn
+                    if (verifyCn) {
+                        const cnResult = await checkCnReachability(ip, port);
+                        return new Response(JSON.stringify({ text, latency, tls: true, cnResult }), {
+                            status: 200,
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                    }
                     return new Response(JSON.stringify({ text, latency, tls: true }), {
                         status: 200,
                         headers: { 'Content-Type': 'application/json' }
@@ -2936,6 +3002,9 @@ function htmlPage() {
                 <option value="1024">1024</option>
             </select>
             </label>
+            <label style="margin-left:10px;font-size:0.9em;">
+              <input type="checkbox" id="verifyCnCheck" checked> 🇨🇳 中国可达验证
+            </label>
 
           <!-- <label>并发：<input id="concurrency" value="20" size="3"></label>-->
         </div>
@@ -2966,7 +3035,7 @@ function htmlPage() {
         <div id="resultSummary">尚未测试</div>
         <div class="resultTableWrapper" id="resultWrapper">
           <table>
-            <thead><tr><th>#</th><th>IP</th><th>RTT(ms)</th><th>COLO</th><th>HOST</th></tr></thead>
+            <thead><tr><th>#</th><th>IP</th><th>RTT(ms)</th><th>Loss%</th><th>COLO</th><th>HOST</th></tr></thead>
             <tbody id="resultTable"></tbody>
           </table>
         </div>
@@ -3011,6 +3080,9 @@ function htmlPage() {
             <option value="1024">1024</option>
         </select>
         </label>
+          <label style="margin-left:10px;font-size:0.9em;">
+            <input type="checkbox" id="proxyVerifyCnCheck" checked> 🇨🇳 中国可达验证
+          </label>
           <!-- <label>并发：<input id="proxyConcurrency" value="20" size="3"></label>-->
         </div>
         <div>
@@ -3040,7 +3112,7 @@ function htmlPage() {
         <div id="proxyResultSummary">尚未测试</div>
         <div class="resultTableWrapper" id="proxyResultWrapper">
           <table>
-            <thead><tr><th>#</th><th>IP</th><th>RTT(ms)</th><th>COLO</th><th>HOST</th></tr></thead>
+            <thead><tr><th>#</th><th>IP</th><th>RTT(ms)</th><th>Loss%</th><th>COLO</th><th>HOST</th></tr></thead>
             <tbody id="proxyResultTable"></tbody>
           </table>
         </div>
@@ -3071,7 +3143,7 @@ function pageLogic() {
     }
 
     const userHost = "${host || ''}";
-
+    let verifyCnEnabled = true;
     const extraValueProxy = "${extraIpProxy || ''}";
     if (extraValueProxy) {
         const selectProxy = document.getElementById("proxySource");
@@ -3185,6 +3257,10 @@ function pageLogic() {
       const selectedIPSource = ipSourceSelect.value;
       const ipSourceName = ipSourceSelect.options[ipSourceSelect.selectedIndex].text;
 
+      // 读取中国可达验证复选框
+      const verifyCnCheck = document.getElementById(isProxy ? 'proxyVerifyCnCheck' : 'verifyCnCheck');
+      verifyCnEnabled = verifyCnCheck ? verifyCnCheck.checked : true;
+
       // Get or initialize cumulative skip from sessionStorage
       const storageKey = isProxy ? 'cf_test_skip_proxy' : 'cf_test_skip_normal';
       let cumulativeSkipped = parseInt(sessionStorage.getItem(storageKey)) || 0;
@@ -3236,7 +3312,7 @@ function pageLogic() {
       const ips = Array.isArray(originalIPs) ? originalIPs : originalIPs.split('\\n');
       ips.forEach((ip, i) => {
         const row = document.createElement('tr');
-        row.innerHTML = '<td>' + (i + 1) + '</td><td>' + ip + '</td><td>-</td><td>-</td>';
+        row.innerHTML = '<td>' + (i + 1) + '</td><td>' + ip + '</td><td>-</td><td>-</td><td>-</td><td>-</td>';
         tableBody.appendChild(row);
       });
       resultSummary.textContent = \`已加载 \${ips.length} 个 IP，准备开始测试...\`;
@@ -3309,13 +3385,13 @@ function pageLogic() {
 
       if (cancelRequested) {
           progressText.textContent = \`⏹️ 已取消测试（有效IP \${valid}/\${total}）\`;
-          return results.filter(Boolean).sort((a, b) => a.latency - b.latency);
+          return results.filter(Boolean).sort((a, b) => (a.cnLatency > 0 ? a.cnLatency : a.latency) - (b.cnLatency > 0 ? b.cnLatency : b.latency));
       }
 
       const valid = results.filter(Boolean).length;
       progressFill.style.width = '100%';
       progressText.textContent = \`✅ 测试完成!(有效IP \${valid}/\${total}) \`;
-      const filtered = results.filter(Boolean).sort((a, b) => a.latency - b.latency);
+      const filtered = results.filter(Boolean).sort((a, b) => (a.cnLatency > 0 ? a.cnLatency : a.latency) - (b.cnLatency > 0 ? b.cnLatency : b.latency));
       return filtered;
     }
 
@@ -3343,6 +3419,7 @@ function pageLogic() {
       try {
         let relayUrl = '/ipsTest?ip=' + encodeURIComponent(ip) + '&port=' + encodeURIComponent(port) + '&timeout=' + timeout;
         if (userHost) relayUrl += '&host=' + encodeURIComponent(userHost);
+        if (verifyCnEnabled) relayUrl += '&verify_cn=true';
         const res = await fetchWithTimeout(relayUrl, timeout + 2000);
         if (!res || res.status !== 200) return null;
 
@@ -3351,10 +3428,17 @@ function pageLogic() {
         const trace = buildTrace(data.text);
         if (!trace?.colo || !trace?.ip) return null;
         const latency = Date.now() - start;
+        // 从 itdog.cn 结果中提取中国网络延迟和丢包率
+        const cnLatency = data.cnResult?.avgLatency || 0;
+        const cnLossRate = data.cnResult?.lossRate ?? -1; // -1 表示未测试
+        const cnVerified = data.cnResult?.isCnVerified === true;
         return {
           ip,
           port,
-          latency,
+          latency,          // 浏览器→Worker 总耗时（快，但非中国延迟）
+          cnLatency,        // 中国节点平均延迟（来自 itdog.cn）
+          cnLossRate,       // 中国节点丢包率
+          cnVerified,       // 是否经过中国验证
           colo: trace.colo,
           responseIP: trace.ip,
           tls: data.tls === true,
@@ -3410,10 +3494,13 @@ function pageLogic() {
     function insertSortedRow(tableBody, res) {
       if (cancelRequested) return;
       const rows = tableBody.rows;
+      // 按中国延迟排序（有 cnLatency 用 cnLatency，否则用 latency）
+      const resSortVal = res.cnLatency > 0 ? res.cnLatency : res.latency;
       let insertIndex = rows.length;
       for (let i = 0; i < rows.length; i++) {
-        const existingLatency = parseInt(rows[i].cells[2].textContent);
-        if (res.latency < existingLatency) {
+        const cellText = rows[i].cells[2].textContent;
+        const existingVal = parseInt(cellText) || 99999;
+        if (resSortVal < existingVal) {
           insertIndex = i;
           break;
         }
@@ -3421,9 +3508,21 @@ function pageLogic() {
       const row = tableBody.insertRow(insertIndex);
       row.insertCell().textContent = insertIndex + 1;
       row.insertCell().textContent = res.ip;
-      row.insertCell().textContent = \`\${ res.latency } ms\`;
-      row.insertCell().textContent = res.colo || 'CF优选';
-      row.insertCell().textContent = res.checkedHost || '-';
+      // RTT 优先显示中国延迟，若无则显示原始延迟
+      const displayRtt = res.cnLatency > 0 ? res.cnLatency : res.latency;
+      row.insertCell().textContent = \`\${ displayRtt } ms\`;
+      // 丢包率
+      if (res.cnLossRate >= 0) {
+        const lossCell = row.insertCell();
+        lossCell.textContent = res.cnLossRate + '%';
+        lossCell.style.color = res.cnLossRate === 0 ? 'limegreen' : (res.cnLossRate <= 20 ? '#ffa500' : '#ff4444');
+      } else {
+        row.insertCell().textContent = '-';
+      }
+      const coloCell = row.insertCell();
+      coloCell.textContent = res.colo || 'CF优选';
+      const hostCell = row.insertCell();
+      hostCell.textContent = res.checkedHost || '-';
       for (let i = 0; i < tableBody.rows.length; i++) {
         tableBody.rows[i].cells[0].textContent = i + 1;
       }
@@ -3476,7 +3575,7 @@ function pageLogic() {
       }
       const lines = rows.map(row => {
         const ip = row.cells[1].textContent;
-        const colo = row.cells[3].textContent;
+        const colo = row.cells[4].textContent; // cells[4] = COLO (新布局: Loss% 占 cells[3])
         return \`\${ ip }:\${ port }#\${ colo }\`;
       });
       const textToCopy = lines.join('\\n');
@@ -3497,7 +3596,7 @@ function pageLogic() {
       }
       const lines = rows.map(row => {
         const ip = row.cells[1].textContent;
-        const colo = row.cells[3].textContent;
+        const colo = row.cells[4].textContent; // cells[4] = COLO (新布局)
         return \`\${ ip }:\${ port }#\${ colo } \`;
       });
       const textToSave = lines.join("\\n");
@@ -3536,7 +3635,7 @@ function pageLogic() {
       }
       const lines = rows.map(row => {
         const ip = row.cells[1].textContent.trim();
-        const colo = row.cells[3].textContent.trim();
+        const colo = row.cells[4].textContent.trim(); // cells[4] = COLO (新布局)
         return \`\${ip}:\${ port }#\${colo}\`;
       });
       const key = \`cf_\${ isProxy ? "proxy" : "normal" }_ip\`;
