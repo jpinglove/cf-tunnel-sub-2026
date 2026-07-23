@@ -2789,11 +2789,55 @@ function htmlPage() {
     }
     .navbar-right a:hover {
         color: #fff;
-        opacity: 0.8; 
+        opacity: 0.8;
+    }
+
+    /* Toast 通知 */
+    .toast-container {
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 99999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        pointer-events: none;
+    }
+    .toast {
+        padding: 12px 24px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 500;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+        animation: toastIn 0.3s ease, toastOut 0.3s ease 2.2s forwards;
+        pointer-events: auto;
+        max-width: 420px;
+        text-align: center;
+        line-height: 1.5;
+        white-space: nowrap;
+    }
+    .toast-success {
+        background: #2ea043;
+        color: #fff;
+    }
+    .toast-error {
+        background: #f85149;
+        color: #fff;
+    }
+    @keyframes toastIn {
+        from { opacity: 0; transform: translateY(-24px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes toastOut {
+        from { opacity: 1; transform: translateY(0); }
+        to   { opacity: 0; transform: translateY(-24px); }
     }
   </style>
   </head>
   <body>
+    <div id="toast-container" class="toast-container"></div>
     <div class="navbar">
         <div class="navbar-left">
             <button class="back-btn" onclick="goHome()">🏠 主页</button>
@@ -3361,6 +3405,16 @@ function pageLogic() {
       }
     }
 
+    //✅ Toast 通知
+    function showToast(msg, type = 'success') {
+      const el = document.createElement('div');
+      el.className = 'toast toast-' + type;
+      el.textContent = msg;
+      const c = document.getElementById('toast-container');
+      if (c) { c.appendChild(el); }
+      setTimeout(() => { if (el.parentNode) el.remove(); }, 2600);
+    }
+
     //✅ 取消操作
     function cancelTest(event) {
       cancelRequested = true;
@@ -3386,7 +3440,7 @@ function pageLogic() {
     //   const rows = Array.from(resultTable.rows).slice(0, DEFAULT_SAVE_IPS_COUNT);
       const rows = Array.from(resultTable.rows); //.slice(0, DEFAULT_SAVE_IPS_COUNT);
       if (rows.length === 0) {
-        alert("没有可复制的结果");
+        showToast('⚠️ 没有可复制的结果', 'error');
         return;
       }
       const lines = rows.map(row => {
@@ -3396,20 +3450,18 @@ function pageLogic() {
       });
       const textToCopy = lines.join('\\n');
       navigator.clipboard.writeText(textToCopy)
-        .then(() => alert("✅ 已复制,优选IP"))
-        .catch(() => alert("❌ 复制失败，请手动复制"));
+        .then(() => showToast('✅ 已复制，共 ' + lines.length + ' 条'))
+        .catch(() => showToast('❌ 复制失败，请手动复制', 'error'));
     }
 
     //✅ KV保存操作
     function saveTop50(isProxy) {
       const resultTable = document.getElementById(isProxy ? 'proxyResultTable' : 'resultTable');
       const port = document.getElementById(isProxy ? 'proxyTargetPort' : 'targetPort').value;
-      const saveStatus = document.getElementById(isProxy ? 'saveStatusProxy' : 'saveStatus');
     //   const rows = Array.from(resultTable.rows).slice(0, DEFAULT_SAVE_IPS_COUNT);
       const rows = Array.from(resultTable.rows); //.slice(0, DEFAULT_SAVE_IPS_COUNT);
       if (rows.length === 0) {
-        saveStatus.style.color = '#f85149';
-        saveStatus.textContent = '⚠ 没有可保存的结果';
+        showToast('⚠️ 没有可保存的结果', 'error');
         return;
       }
       const lines = rows.map(row => {
@@ -3431,16 +3483,13 @@ function pageLogic() {
       .then(res => res.json())
       .then(r => {
         if (r.ok) {
-          saveStatus.style.color = '#2ea043'; 
-          saveStatus.textContent = \`✅ 覆盖保存成功，共 \${ lines.length } 条\`;
+          showToast(\`✅ 覆盖保存成功，共 \${ lines.length } 条\`);
         } else {
-          saveStatus.style.color = '#f85149';
-          saveStatus.textContent = \`❌ 保存失败：\${ r.error || "未知错误" } \`;
+          showToast(\`❌ 保存失败：\${ r.error || "未知错误" }\`, 'error');
         }
       })
       .catch(err => {
-        saveStatus.style.color = '#f85149';
-        saveStatus.textContent = \`❌ 保存异常：\${ err.message }\`;
+        showToast(\`❌ 保存异常：\${ err.message }\`, 'error');
       });
     }
 
@@ -3448,12 +3497,10 @@ function pageLogic() {
     async function appendTop50(isProxy) {
       const resultTable = document.getElementById(isProxy ? 'proxyResultTable' : 'resultTable');
       const port = document.getElementById(isProxy ? 'proxyTargetPort' : 'targetPort').value;
-      const saveStatus = document.getElementById(isProxy ? 'saveStatusProxy' : 'saveStatus');
     //   const rows = Array.from(resultTable.rows).slice(0, DEFAULT_SAVE_IPS_COUNT);
       const rows = Array.from(resultTable.rows); //.slice(0, DEFAULT_SAVE_IPS_COUNT);
       if (rows.length === 0) {
-        saveStatus.style.color = '#f85149';
-        saveStatus.textContent = "⚠ 没有可追加的数据";
+        showToast('⚠️ 没有可追加的数据', 'error');
         return;
       }
       const lines = rows.map(row => {
@@ -3470,15 +3517,12 @@ function pageLogic() {
         });
         const result = await saveResp.json();
         if (result.ok) {
-          saveStatus.style.color = '#2ea043';
-          saveStatus.textContent = \`✅ 已追加并保存成功，共 \${ lines.length } 条\`;
+          showToast(\`✅ 已追加并保存成功，共 \${ lines.length } 条\`);
         } else {
-          saveStatus.style.color = '#f85149';
-          saveStatus.textContent = \`❌ 保存失败：\${ result.error || "未知错误" } \`;
+          showToast(\`❌ 保存失败：\${ result.error || "未知错误" }\`, 'error');
         }
       } catch (error) {
-        saveStatus.style.color = '#f85149';
-        saveStatus.textContent = \`❌ 保存异常：\${ error.message } \`;
+        showToast(\`❌ 保存异常：\${ error.message }\`, 'error');
       }
     }
 
