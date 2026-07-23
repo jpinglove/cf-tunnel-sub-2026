@@ -256,6 +256,7 @@ export async function mainHandler({ req, url, headers, res, env }) {
         const ip = url.searchParams.get('ip');
         const port = url.searchParams.get('port') || '80';
         const timeout = parseInt(url.searchParams.get('timeout')) || 4000;
+        const userHost = url.searchParams.get('host');
 
         if (!ip) {
             return new Response(JSON.stringify({ error: 'missing ip' }), {
@@ -264,12 +265,45 @@ export async function mainHandler({ req, url, headers, res, env }) {
             });
         }
 
-        // 将 IP 编码为十六进制，用于通配符 DNS 子域名
-        // 例: 103.21.244.244 → 67.15.f4.f4 → 6715f4f4
-        const nip = ip.split('.').map(n => Number(n).toString(16).padStart(2, '0')).join('');
+        const portNum = parseInt(port);
+        const httpsPortSet = new Set([443, 8443, 2053, 2096, 2087, 2083]);
+        const isHttpsPort = httpsPortSet.has(portNum);
 
-        // 通配符 DNS 服务备用列表（通过 HTTP 测试，避免 SSL 问题）
-        // sslip.io 是目前活跃维护的服务，nip.io 由 sslip.io 提供支持
+        // HTTPS resolveOverride test (verifies TLS + SNI routing to user's zone)
+        if (userHost && isHttpsPort) {
+            try {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), timeout);
+                const start = Date.now();
+                const testUrl = `https://${userHost}:${port}/cdn-cgi/trace?t=${Date.now()}`;
+                const res = await fetch(testUrl, {
+                    signal: controller.signal,
+                    cf: { resolveOverride: ip }
+                });
+                clearTimeout(timer);
+
+                if (res.status === 200) {
+                    const text = await res.text();
+                    const latency = Date.now() - start;
+                    return new Response(JSON.stringify({ text, latency }), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                }
+                return new Response(JSON.stringify({ error: `HTTPS_${res.status}` }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            } catch (err) {
+                return new Response(JSON.stringify({ error: `${err.name || 'TlsError'} (resolveOverride)` }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }
+        }
+
+        // Fallback: HTTP wildcard DNS test (for HTTP ports or when resolveOverride unavailable)
+        const nip = ip.split('.').map(n => Number(n).toString(16).padStart(2, '0')).join('');
         const wildcardServices = ['sslip.io', 'nip.io', 'xip.io'];
 
         let lastError = '';
@@ -984,16 +1018,16 @@ async function getConfigContent(rawHost, userAgent, _url, host, fakeHostName, fa
     log(`[getConfigContent]---> protType: ${protType}`);
     if (!protType) {
         protType = doubleBase64Decode(protTypeBase64);
-        const responseBody1 = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
-        const responseBodyTop = splitNodeData(ipLocal, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
+        const responseBody1 = splitNodeData(uniqueIpTxt, noTLS, host, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
+        const responseBodyTop = splitNodeData(ipLocal, noTLS, host, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
         protType = doubleBase64Decode(protTypeBase64Tro);
-        const responseBody2 = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
+        const responseBody2 = splitNodeData(uniqueIpTxt, noTLS, host, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
         responseBody = responseBodyTop
             ? [responseBodyTop, responseBody1, responseBody2].join('\n')
             : [responseBody1, responseBody2].join('\n');
     } else {
-        const responseBodyTop = splitNodeData(ipLocal, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
-        responseBody = splitNodeData(uniqueIpTxt, noTLS, fakeHostName, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
+        const responseBodyTop = splitNodeData(ipLocal, noTLS, host, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
+        responseBody = splitNodeData(uniqueIpTxt, noTLS, host, fakeUserId, userAgent, protType, nat64, hostRemark, proxyIP);
         responseBody = responseBodyTop
             ? [responseBodyTop, responseBody].join('\n')
             : responseBody;
@@ -3039,6 +3073,8 @@ function pageLogic() {
         select.appendChild(option);
     }
 
+    const userHost = "${host || ''}";
+
     const extraValueProxy = "${extraIpProxy || ''}";
     if (extraValueProxy) {
         const selectProxy = document.getElementById("proxySource");
@@ -3308,7 +3344,8 @@ function pageLogic() {
       const start = Date.now();
 
       try {
-        const relayUrl = '/ipsTest?ip=' + encodeURIComponent(ip) + '&port=' + encodeURIComponent(port) + '&timeout=' + timeout;
+        let relayUrl = '/ipsTest?ip=' + encodeURIComponent(ip) + '&port=' + encodeURIComponent(port) + '&timeout=' + timeout;
+        if (userHost) relayUrl += '&host=' + encodeURIComponent(userHost);
         const res = await fetchWithTimeout(relayUrl, timeout + 2000);
         if (!res || res.status !== 200) return null;
 
