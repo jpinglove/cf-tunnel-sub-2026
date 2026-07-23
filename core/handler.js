@@ -207,6 +207,13 @@ export async function mainHandler({ req, url, headers, res, env }) {
         const html = await getSettingHtml(rawHost);
         return sendResponse(html, userAgent, res);
     }
+    if (url.pathname === '/networkCheck') {
+        const country = req?.cf?.country || 'unknown';
+        const ip = req?.cf?.ip || headers.get('CF-Connecting-IP') || '';
+        return new Response(JSON.stringify({ country, ip }), {
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        });
+    }
     if (url.pathname === `/${id}`) {
         const html = await getConfig(rawHost, uuid, host, paddr, parsedSocks5, userAgent, url, protType, nat64, hostRemark);
         return sendResponse(html, userAgent, res);
@@ -255,7 +262,7 @@ export async function mainHandler({ req, url, headers, res, env }) {
     if (url.pathname === '/ipsTest') {
         const ip = url.searchParams.get('ip');
         const port = url.searchParams.get('port') || '80';
-        const timeout = parseInt(url.searchParams.get('timeout')) || 4000;
+        const timeout = parseInt(url.searchParams.get('timeout')) || 3000;
         const userHost = url.searchParams.get('host');
 
         if (!ip) {
@@ -284,8 +291,16 @@ export async function mainHandler({ req, url, headers, res, env }) {
 
                 if (res.status === 200) {
                     const text = await res.text();
+                    // Validate trace response contains expected fields
+                    const traceValid = text.includes('colo=') && text.includes('ip=');
+                    if (!traceValid) {
+                        return new Response(JSON.stringify({ error: 'Invalid trace response (resolveOverride)' }), {
+                            status: 200,
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                    }
                     const latency = Date.now() - start;
-                    return new Response(JSON.stringify({ text, latency }), {
+                    return new Response(JSON.stringify({ text, latency, tls: true }), {
                         status: 200,
                         headers: { 'Content-Type': 'application/json' }
                     });
@@ -2902,21 +2917,12 @@ function htmlPage() {
           </label>
           <label>端口：
             <select id="targetPort">
-              <optgroup label="—— HTTPS ——"></optgroup>
               <option value="443" selected>443</option>
               <option value="8443">8443</option>
               <option value="2053">2053</option>
               <option value="2096">2096</option>
               <option value="2087">2087</option>
               <option value="2083">2083</option>
-              <optgroup label="—— HTTP ——"></optgroup>
-              <option value="80">80</option>
-              <option value="8080">8080</option>
-              <option value="8880">8880</option>
-              <option value="2052">2052</option>
-              <option value="2086">2086</option>
-              <option value="2095">2095</option>
-              <option value="2082">2082</option>
             </select>
           </label>
 
@@ -2960,7 +2966,7 @@ function htmlPage() {
         <div id="resultSummary">尚未测试</div>
         <div class="resultTableWrapper" id="resultWrapper">
           <table>
-            <thead><tr><th>#</th><th>IP</th><th>RTT(ms)</th><th>COLO</th></tr></thead>
+            <thead><tr><th>#</th><th>IP</th><th>RTT(ms)</th><th>COLO</th><th>HOST</th></tr></thead>
             <tbody id="resultTable"></tbody>
           </table>
         </div>
@@ -2986,21 +2992,12 @@ function htmlPage() {
           </label>
           <label>端口：
             <select id="proxyTargetPort">
-              <optgroup label="—— HTTPS ——"></optgroup>
               <option value="443" selected>443</option>
               <option value="8443">8443</option>
               <option value="2053">2053</option>
               <option value="2096">2096</option>
               <option value="2087">2087</option>
               <option value="2083">2083</option>
-              <optgroup label="—— HTTP ——"></optgroup>
-              <option value="80">80</option>
-              <option value="8080">8080</option>
-              <option value="8880">8880</option>
-              <option value="2052">2052</option>
-              <option value="2086">2086</option>
-              <option value="2095">2095</option>
-              <option value="2082">2082</option>
             </select>
           </label>
 
@@ -3043,7 +3040,7 @@ function htmlPage() {
         <div id="proxyResultSummary">尚未测试</div>
         <div class="resultTableWrapper" id="proxyResultWrapper">
           <table>
-            <thead><tr><th>#</th><th>IP</th><th>RTT(ms)</th><th>COLO</th></tr></thead>
+            <thead><tr><th>#</th><th>IP</th><th>RTT(ms)</th><th>COLO</th><th>HOST</th></tr></thead>
             <tbody id="proxyResultTable"></tbody>
           </table>
         </div>
@@ -3360,6 +3357,8 @@ function pageLogic() {
           latency,
           colo: trace.colo,
           responseIP: trace.ip,
+          tls: data.tls === true,
+          checkedHost: userHost || '',
           type: trace.ip.includes(':') || trace.ip === ip ? 'proxy' : 'official'
         };
       } catch (error) {
@@ -3368,17 +3367,11 @@ function pageLogic() {
       }
     }
 
-    // ✅ 自动重试 3 次
-    async function testIP(ip, port, timeout = 5000) { // Increased timeout from 5000ms to 10000ms (10 seconds)
-        let lastFail = null;
-        for (let tryCount = 1; tryCount <= 3; tryCount++) {
-            if (cancelRequested) return null;
-            const result = await runTest(ip, port, timeout);
-            if (result) return result;
-            lastFail = result;
-            await new Promise(r => setTimeout(r, 150));
-        }
-        return null;
+    // ✅ 自动重试 1 次（之前为3次，减少假通过可能）
+    async function testIP(ip, port, timeout = 5000) {
+        if (cancelRequested) return null;
+        const result = await runTest(ip, port, timeout);
+        return result || null;
     }
 
     // ✅ 提取 trace 信息
@@ -3430,6 +3423,7 @@ function pageLogic() {
       row.insertCell().textContent = res.ip;
       row.insertCell().textContent = \`\${ res.latency } ms\`;
       row.insertCell().textContent = res.colo || 'CF优选';
+      row.insertCell().textContent = res.checkedHost || '-';
       for (let i = 0; i < tableBody.rows.length; i++) {
         tableBody.rows[i].cells[0].textContent = i + 1;
       }
@@ -3576,17 +3570,10 @@ function pageLogic() {
         container.appendChild(notice);
 
         try {
-            const cfRes = await fetch("https://speed.cloudflare.com/cdn-cgi/trace?t=${Date.now()}");
-            const cfText = await cfRes.text();
-
-            const text = cfText.trim().split("\\n");
-            const data = {};
-            text.forEach(line => {
-                const [key, value] = line.split('=');
-                if (key && value) data[key.trim()] = value.trim();
-            });
+            const cfRes = await fetch('/networkCheck');
+            const data = await cfRes.json();
             const ip = data.ip || '未知';
-            const loc = data.loc || '未知';
+            const loc = data.country || '未知';
 
             let message = \`✅ 您当前检测为CN地区网络，可以进行优选\`;
             let color = "limegreen";
